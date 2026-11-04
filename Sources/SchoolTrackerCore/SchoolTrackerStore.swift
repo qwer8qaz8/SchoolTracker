@@ -114,7 +114,7 @@ public final class SchoolTrackerStore: @unchecked Sendable {
         syncedAt: Date = Date()
     ) throws -> SchoolTrackerState {
         var state = (try? loadState()) ?? SchoolTrackerState()
-        state.courses = report.courses
+        state.courses = Self.mergeCourses(existing: state.courses, imported: report.courses)
         state.lastSyncedAt = syncedAt
         if let link {
             state.lastSyncedDistrict = link.district
@@ -122,5 +122,127 @@ public final class SchoolTrackerStore: @unchecked Sendable {
         }
         try saveState(state)
         return state
+    }
+
+    private static func mergeCourses(
+        existing: [ImportedCourse],
+        imported: [ImportedCourse]
+    ) -> [ImportedCourse] {
+        var usedExistingCourseIDs = Set<UUID>()
+
+        return imported.map { incoming in
+            var mergedCourse = incoming
+            if let matchedCourse = findMatchingCourse(
+                for: incoming,
+                in: existing,
+                excluding: usedExistingCourseIDs
+            ) {
+                usedExistingCourseIDs.insert(matchedCourse.id)
+                mergedCourse.id = matchedCourse.id
+                mergedCourse.categories = mergeCategories(
+                    existing: matchedCourse.categories,
+                    imported: incoming.categories
+                )
+                mergedCourse.assignments = mergeAssignments(
+                    existing: matchedCourse.assignments,
+                    imported: incoming.assignments
+                )
+            }
+            return mergedCourse
+        }
+    }
+
+    private static func findMatchingCourse(
+        for incoming: ImportedCourse,
+        in existing: [ImportedCourse],
+        excluding usedIDs: Set<UUID>
+    ) -> ImportedCourse? {
+        let incomingCode = incoming.courseCode?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !incomingCode.isEmpty {
+            if let matchByCode = existing.first(where: { candidate in
+                guard !usedIDs.contains(candidate.id),
+                      let candidateCode = candidate.courseCode?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !candidateCode.isEmpty
+                else { return false }
+                return candidateCode.caseInsensitiveCompare(incomingCode) == .orderedSame
+            }) {
+                return matchByCode
+            }
+        }
+
+        let incomingName = incoming.courseName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return existing.first { candidate in
+            guard !usedIDs.contains(candidate.id) else { return false }
+            let candidateName = candidate.courseName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return candidateName.caseInsensitiveCompare(incomingName) == .orderedSame
+        }
+    }
+
+    private static func mergeCategories(
+        existing: [CategoryBreakdown],
+        imported: [CategoryBreakdown]
+    ) -> [CategoryBreakdown] {
+        var usedIDs = Set<UUID>()
+        return imported.map { incoming in
+            var merged = incoming
+            if let match = existing.first(where: { candidate in
+                !usedIDs.contains(candidate.id)
+                    && candidate.name.caseInsensitiveCompare(incoming.name) == .orderedSame
+            }) {
+                usedIDs.insert(match.id)
+                merged.id = match.id
+            }
+            return merged
+        }
+    }
+
+    private static func mergeAssignments(
+        existing: [ImportedAssignment],
+        imported: [ImportedAssignment]
+    ) -> [ImportedAssignment] {
+        var usedIDs = Set<UUID>()
+        return imported.map { incoming in
+            var merged = incoming
+            if let match = findMatchingAssignment(
+                for: incoming,
+                in: existing,
+                excluding: usedIDs
+            ) {
+                usedIDs.insert(match.id)
+                merged.id = match.id
+                merged.isCompleted = match.isCompleted
+            }
+            return merged
+        }
+    }
+
+    private static func findMatchingAssignment(
+        for incoming: ImportedAssignment,
+        in existing: [ImportedAssignment],
+        excluding usedIDs: Set<UUID>
+    ) -> ImportedAssignment? {
+        let incomingTitle = incoming.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingCategory = incoming.category.trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingDue = incoming.dueDate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if let exactMatch = existing.first(where: { candidate in
+            guard !usedIDs.contains(candidate.id) else { return false }
+            let candidateDue = candidate.dueDate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return candidate.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare(incomingTitle) == .orderedSame
+                && candidate.category.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare(incomingCategory) == .orderedSame
+                && candidateDue.caseInsensitiveCompare(incomingDue) == .orderedSame
+        }) {
+            return exactMatch
+        }
+
+        return existing.first { candidate in
+            guard !usedIDs.contains(candidate.id) else { return false }
+            return candidate.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare(incomingTitle) == .orderedSame
+                && candidate.category.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare(incomingCategory) == .orderedSame
+        }
     }
 }

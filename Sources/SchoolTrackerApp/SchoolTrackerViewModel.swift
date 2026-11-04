@@ -240,7 +240,10 @@ public final class SchoolTrackerViewModel: ObservableObject {
                 assignmentCount: assignmentCount,
                 district: validatedLink.district
             )
-            if selectedSection == nil || state.courses.isEmpty == false {
+            if selectedSection == nil {
+                selectedSection = .overview
+            } else if case .course(let selectedID) = selectedSection,
+                      !state.courses.contains(where: { $0.id == selectedID }) {
                 selectedSection = .overview
             }
         } catch let error as RenWebError {
@@ -303,19 +306,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
     // MARK: - Formatting Helpers
 
     public static func letterGrade(for average: Double) -> String {
-        switch average {
-        case 97...: return "A+"
-        case 93..<97: return "A"
-        case 90..<93: return "A-"
-        case 87..<90: return "B+"
-        case 83..<87: return "B"
-        case 80..<83: return "B-"
-        case 77..<80: return "C+"
-        case 73..<77: return "C"
-        case 70..<73: return "C-"
-        case 60..<70: return "D"
-        default: return "F"
-        }
+        RenWebReportParser.inferLetterGrade(for: average)
     }
 
     public static func gradeColor(for average: Double?) -> Color {

@@ -93,6 +93,47 @@ public enum AnonymizedReportFixtures {
     </html>
     """
 
+    /// Synthetic ColdFusion GetReport.cfm multi-table layout with unclosed `</td`, `Weight =` categories,
+    /// `Category Average`, and `Term Grade` rows (zero PII).
+    public static let coldFusionMultiTableReportHTML = """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Gradebook Progress Report</title></head>
+    <body>
+      <table>
+        <tr><td colspan="3">Gradebook Progress Report</td></tr>
+        <tr><td>Student, Test</td><td>2026-2027</td><td>Instructor, Demo A</td></tr>
+        <tr><td>MAT-401</td><td>Q2</td><td>WEIGHTED</td></tr>
+        <tr><td colspan="3">AP Calculus BC</td</tr>
+      </table>
+      <table>
+        <tr><td>Homework</td><td></td><td>Weight = 30.0</td></tr>
+        <tr><td>Assignment</td><td>Pts</td><td>Max</td><td>Avg</td><td>Status</td><td>Due</td></tr>
+        <tr><td>5.2 Day 1</td><td>91.0</td><td>100.0</td><td>91.0%</td><td>Valid</td><td>10/13</td></tr>
+        <tr><td>5.3 Practice</td><td>--</td><td>100.0</td><td></td><td>Pending</td><td>11/06</td></tr>
+        <tr><td>Category Average</td><td>91.00</td><td></td></tr>
+        <tr><td>Quizzes</td><td></td><td>Weight = 70.0</td></tr>
+        <tr><td>Assignment</td><td>Pts</td><td>Max</td><td>Avg</td><td>Status</td><td>Due</td></tr>
+        <tr><td>Unit 5 Quiz</td><td>95.0</td><td>100.0</td><td>95.0%</td><td>Valid</td><td>10/20</td></tr>
+        <tr><td>Category Average</td><td>95.00</td><td></td></tr>
+        <tr><td>Term Grade</td><td>94</td><td>A</td></tr>
+      </table>
+      <table>
+        <tr><td colspan="3">Gradebook Progress Report</td></tr>
+        <tr><td>Student, Test</td><td>2026-2027</td><td>Instructor, Demo B</td></tr>
+        <tr><td>SCI-302</td><td>Q2</td><td>PERCENT</td></tr>
+        <tr><td colspan="3">Honors Chemistry</td</tr>
+      </table>
+      <table>
+        <tr><td>Labs</td><td></td><td>Weight = 100.0</td></tr>
+        <tr><td>Assignment</td><td>Pts</td><td>Max</td><td>Avg</td><td>Status</td><td>Due</td></tr>
+        <tr><td>Titration Lab &amp; Report</td><td>88.0</td><td>100.0</td><td>88.0%</td><td>Valid</td><td>10/25</td></tr>
+        <tr><td>Category Average</td><td>88.00</td><td></td></tr>
+      </table>
+    </body>
+    </html>
+    """
+
     /// Generates a huge report with `courseCount` courses and `assignmentsPerCourse` rows to probe parser scaling.
     public static func makeLargeReportHTML(courseCount: Int, assignmentsPerCourse: Int) -> String {
         var sections = [String]()

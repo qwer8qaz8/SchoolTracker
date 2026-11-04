@@ -1,6 +1,10 @@
 import Foundation
+#if canImport(XCTest)
 import XCTest
+#endif
+#if !STANDALONE_TEST_RUNNER
 @testable import SchoolTrackerCore
+#endif
 
 final class SchoolTrackerCoreTests: XCTestCase {
 
@@ -52,7 +56,7 @@ final class SchoolTrackerCoreTests: XCTestCase {
         }
     }
 
-    // MARK: - 2. HTML Report Parsing & Session Expiry Tests
+    // MARK: - 2. HTML Report Parsing (Course-Section & ColdFusion Multi-Table) & Session Expiry Tests
 
     func testValidMultiCourseReportParsing() throws {
         let report = try RenWebReportParser.parse(html: AnonymizedReportFixtures.validMultiCourseReportHTML)
@@ -70,6 +74,46 @@ final class SchoolTrackerCoreTests: XCTestCase {
         XCTAssertEqual(chem.numericAverage ?? 0, 88.0, accuracy: 0.01)
         XCTAssertEqual(chem.letterGrade, "B+")
         XCTAssertEqual(chem.assignments.count, 1)
+    }
+
+    func testColdFusionMultiTableReportParsing() throws {
+        let report = try RenWebReportParser.parse(html: AnonymizedReportFixtures.coldFusionMultiTableReportHTML)
+        XCTAssertEqual(report.schoolYear, "2026-2027")
+        XCTAssertEqual(report.term, "Q2")
+        XCTAssertEqual(report.courses.count, 2)
+
+        // Course 0: AP Calculus BC (with unclosed </td on row 3, Weight = categories, Category Average, and Term Grade)
+        let calc = report.courses[0]
+        XCTAssertEqual(calc.courseName, "AP Calculus BC")
+        XCTAssertEqual(calc.courseCode, "MAT-401")
+        XCTAssertEqual(calc.teacherName, "Instructor, Demo A")
+        XCTAssertEqual(calc.term, "Q2")
+        XCTAssertEqual(calc.numericAverage ?? 0, 94.0, accuracy: 0.01)
+        XCTAssertEqual(calc.letterGrade, "A")
+        XCTAssertEqual(calc.categories.count, 2)
+        XCTAssertEqual(calc.categories[0].name, "Homework")
+        XCTAssertEqual(calc.categories[0].weight ?? 0, 30.0, accuracy: 0.01)
+        XCTAssertEqual(calc.categories[0].average ?? 0, 91.0, accuracy: 0.01)
+        XCTAssertEqual(calc.categories[1].name, "Quizzes")
+        XCTAssertEqual(calc.categories[1].weight ?? 0, 70.0, accuracy: 0.01)
+        XCTAssertEqual(calc.categories[1].average ?? 0, 95.0, accuracy: 0.01)
+        XCTAssertEqual(calc.assignments.count, 3)
+        XCTAssertEqual(calc.assignments[0].title, "5.2 Day 1")
+        XCTAssertEqual(calc.assignments[0].category, "Homework")
+        XCTAssertTrue(calc.assignments[0].isCompleted)
+        XCTAssertEqual(calc.assignments[1].title, "5.3 Practice")
+        XCTAssertFalse(calc.assignments[1].isCompleted)
+        XCTAssertEqual(calc.assignments[2].title, "Unit 5 Quiz")
+        XCTAssertEqual(calc.assignments[2].category, "Quizzes")
+
+        // Course 1: Honors Chemistry (Term Grade omitted; average inferred from Category Average + inferLetterGrade)
+        let chem = report.courses[1]
+        XCTAssertEqual(chem.courseName, "Honors Chemistry")
+        XCTAssertEqual(chem.courseCode, "SCI-302")
+        XCTAssertEqual(chem.numericAverage ?? 0, 88.0, accuracy: 0.01)
+        XCTAssertEqual(chem.letterGrade, "B+")
+        XCTAssertEqual(chem.assignments.count, 1)
+        XCTAssertEqual(chem.assignments[0].title, "Titration Lab & Report")
     }
 
     func testExpiredSessionHTMLThrowsExpiredOrInvalidSession() {
@@ -108,6 +152,22 @@ final class SchoolTrackerCoreTests: XCTestCase {
         XCTAssertEqual(physics.numericAverage ?? 0, 102.5, accuracy: 0.01)
         XCTAssertEqual(physics.letterGrade, "A+")
         XCTAssertEqual(physics.assignments.count, 3)
+    }
+
+    func testLetterGradeInferenceBoundaries() {
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 98.0), "A+")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 94.0), "A")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 91.0), "A-")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 88.0), "B+")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 85.0), "B")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 81.0), "B-")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 78.0), "C+")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 75.0), "C")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 71.0), "C-")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 68.0), "D+")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 65.0), "D")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 61.0), "D-")
+        XCTAssertEqual(RenWebReportParser.inferLetterGrade(for: 59.9), "F")
     }
 
     func testLargeReportPayloadScalesLinearly() throws {
@@ -171,7 +231,86 @@ final class SchoolTrackerCoreTests: XCTestCase {
         }
     }
 
-    // MARK: - 5. Working Tree Secret & PII Audit
+    // MARK: - 5. SchoolTrackerStore Round-Trip Persistence & Re-Import Merging Tests
+
+    func testSchoolTrackerStoreRoundTripAndRedaction() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SchoolTrackerStoreTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let stateURL = tempDir.appendingPathComponent("state.json", isDirectory: false)
+        let store = SchoolTrackerStore(stateFileURL: stateURL)
+
+        // Initial load when file does not exist returns empty state
+        let initial = try store.loadState()
+        XCTAssertTrue(initial.courses.isEmpty)
+        XCTAssertTrue(initial.tasks.isEmpty)
+
+        // Apply report with validated link and verify on-disk redaction + round-trip
+        let link = try RenWebLinkParser.parse(AnonymizedReportFixtures.validReportURL)
+        let report = try RenWebReportParser.parse(html: AnonymizedReportFixtures.coldFusionMultiTableReportHTML)
+        let syncDate = Date(timeIntervalSince1970: 1_762_300_000)
+
+        try store.applyImportedReport(report, from: link, syncedAt: syncDate)
+        let reloaded = try store.loadState()
+
+        XCTAssertEqual(reloaded.courses.count, 2)
+        XCTAssertEqual(reloaded.lastSyncedDistrict, "TEST-XX")
+        XCTAssertEqual(reloaded.lastSyncedAt, syncDate)
+        XCTAssertNotNil(reloaded.lastRedactedReportURL)
+        XCTAssertFalse((reloaded.lastRedactedReportURL ?? "").contains(AnonymizedReportFixtures.validSessionID))
+        XCTAssertTrue((reloaded.lastRedactedReportURL ?? "").contains("REDACTED"))
+
+        // Corrupt JSON on disk throws PersistenceError.decodeFailed
+        try Data("{corrupt-json".utf8).write(to: stateURL)
+        XCTAssertThrowsError(try store.loadState()) { error in
+            guard case .decodeFailed = error as? PersistenceError else {
+                XCTFail("Expected PersistenceError.decodeFailed, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testSchoolTrackerStoreReimportPreservesCourseIDsAndAssignmentCompletion() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SchoolTrackerReimportTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let stateURL = tempDir.appendingPathComponent("state.json", isDirectory: false)
+        let store = SchoolTrackerStore(stateFileURL: stateURL)
+
+        let firstReport = try RenWebReportParser.parse(html: AnonymizedReportFixtures.coldFusionMultiTableReportHTML)
+        var state = try store.applyImportedReport(firstReport)
+        XCTAssertEqual(state.courses.count, 2)
+
+        let originalCalcID = state.courses[0].id
+        let originalChemID = state.courses[1].id
+
+        // User toggles completion on two assignments and adds a tracked task
+        state.courses[0].assignments[0].isCompleted = false // "5.2 Day 1" toggled to incomplete
+        state.courses[0].assignments[1].isCompleted = true  // "5.3 Practice" toggled to complete
+        state.tasks.append(TrackedTask(title: "Review Taylor Series", courseName: "AP Calculus BC"))
+        try store.saveState(state)
+
+        // Re-import the same courses from a fresh parse (which generates new random UUIDs and default isCompleted flags)
+        let secondReport = try RenWebReportParser.parse(html: AnonymizedReportFixtures.coldFusionMultiTableReportHTML)
+        let merged = try store.applyImportedReport(secondReport)
+
+        XCTAssertEqual(merged.courses.count, 2)
+        XCTAssertEqual(merged.courses[0].id, originalCalcID, "Re-import must preserve existing course UUID")
+        XCTAssertEqual(merged.courses[1].id, originalChemID, "Re-import must preserve existing course UUID")
+        XCTAssertFalse(
+            merged.courses[0].assignments[0].isCompleted,
+            "Re-import must preserve user-toggled isCompleted=false on '5.2 Day 1'"
+        )
+        XCTAssertTrue(
+            merged.courses[0].assignments[1].isCompleted,
+            "Re-import must preserve user-toggled isCompleted=true on '5.3 Practice'"
+        )
+        XCTAssertEqual(merged.tasks.count, 1)
+    }
+
+    // MARK: - 6. Working Tree Secret & PII Audit
 
     func testRepositoryWorkingTreeContainsNoLiveTokens() throws {
         let testFileURL = URL(fileURLWithPath: #filePath)
@@ -217,3 +356,77 @@ final class SchoolTrackerCoreTests: XCTestCase {
         XCTAssertTrue(violations.isEmpty, "Secret audit violations found: \(violations.joined(separator: "; "))")
     }
 }
+
+#if STANDALONE_TEST_RUNNER && !canImport(XCTest)
+@main
+struct StandaloneTestRunner {
+    static func main() async {
+        let suite = SchoolTrackerCoreTests()
+        let syncTests: [(String, () throws -> Void)] = [
+            ("testValidRenWebLinkParsesAndRedactsSessionID", suite.testValidRenWebLinkParsesAndRedactsSessionID),
+            ("testMalformedAndHostSpoofedURLsAreRejected", suite.testMalformedAndHostSpoofedURLsAreRejected),
+            ("testOversizedURLBoundaryIsRejected", suite.testOversizedURLBoundaryIsRejected),
+            ("testValidMultiCourseReportParsing", suite.testValidMultiCourseReportParsing),
+            ("testColdFusionMultiTableReportParsing", suite.testColdFusionMultiTableReportParsing),
+            ("testExpiredSessionHTMLThrowsExpiredOrInvalidSession", suite.testExpiredSessionHTMLThrowsExpiredOrInvalidSession),
+            ("testEmptyAndMalformedHTMLThrowsParseFailure", suite.testEmptyAndMalformedHTMLThrowsParseFailure),
+            ("testBoundaryGradesAndHTMLEntitiesParsing", suite.testBoundaryGradesAndHTMLEntitiesParsing),
+            ("testLetterGradeInferenceBoundaries", suite.testLetterGradeInferenceBoundaries),
+            ("testLargeReportPayloadScalesLinearly", suite.testLargeReportPayloadScalesLinearly),
+            ("testSchoolTrackerStoreRoundTripAndRedaction", suite.testSchoolTrackerStoreRoundTripAndRedaction),
+            ("testSchoolTrackerStoreReimportPreservesCourseIDsAndAssignmentCompletion", suite.testSchoolTrackerStoreReimportPreservesCourseIDsAndAssignmentCompletion),
+            ("testRepositoryWorkingTreeContainsNoLiveTokens", suite.testRepositoryWorkingTreeContainsNoLiveTokens)
+        ]
+        let asyncTests: [(String, () async throws -> Void)] = [
+            ("testConcurrentLinkValidationAndReportParsing", suite.testConcurrentLinkValidationAndReportParsing),
+            ("testClientWithMockFetcherSuccessAndErrors", suite.testClientWithMockFetcherSuccessAndErrors)
+        ]
+
+        var passed = 0
+        var failed = 0
+
+        for (name, body) in syncTests {
+            XCTestFailureTracker.failures.removeAll()
+            do {
+                try body()
+            } catch {
+                XCTFail("Unhandled error thrown: \(error)")
+            }
+            if XCTestFailureTracker.failures.isEmpty {
+                print("[PASS] \(name)")
+                passed += 1
+            } else {
+                print("[FAIL] \(name)")
+                for failure in XCTestFailureTracker.failures {
+                    print("       \(failure)")
+                }
+                failed += 1
+            }
+        }
+
+        for (name, body) in asyncTests {
+            XCTestFailureTracker.failures.removeAll()
+            do {
+                try await body()
+            } catch {
+                XCTFail("Unhandled error thrown: \(error)")
+            }
+            if XCTestFailureTracker.failures.isEmpty {
+                print("[PASS] \(name)")
+                passed += 1
+            } else {
+                print("[FAIL] \(name)")
+                for failure in XCTestFailureTracker.failures {
+                    print("       \(failure)")
+                }
+                failed += 1
+            }
+        }
+
+        print("\nTest Summary: \(passed) passed, \(failed) failed (\(passed + failed) total)")
+        if failed > 0 {
+            Foundation.exit(1)
+        }
+    }
+}
+#endif
