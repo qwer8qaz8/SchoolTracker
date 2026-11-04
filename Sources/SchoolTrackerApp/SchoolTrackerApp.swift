@@ -16,10 +16,22 @@ struct SchoolTrackerApp: App {
         .defaultSize(width: 1120, height: 740)
         .commands {
             CommandGroup(after: .newItem) {
-                Button("Import RenWeb Link…") {
+                Button("Import or Manage RenWeb Link…") {
                     viewModel.openImportSheet()
                 }
                 .keyboardShortcut("i", modifiers: [.command])
+
+                Button("Sync Saved RenWeb Link") {
+                    if viewModel.hasSavedLink {
+                        Task {
+                            await viewModel.syncSavedLink()
+                        }
+                    } else {
+                        viewModel.openImportSheet()
+                    }
+                }
+                .keyboardShortcut("r", modifiers: [.command])
+                .disabled(viewModel.isSyncingSavedLink)
 
                 Button("New Task…") {
                     viewModel.isPresentingNewTaskSheet = true
@@ -31,7 +43,7 @@ struct SchoolTrackerApp: App {
                 Button("Reload Local State") {
                     viewModel.loadInitialState()
                 }
-                .keyboardShortcut("r", modifiers: [.command])
+                .keyboardShortcut("r", modifiers: [.command, .shift])
             }
         }
     }

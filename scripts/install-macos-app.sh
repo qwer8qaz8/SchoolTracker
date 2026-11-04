@@ -80,6 +80,7 @@ fi
 
 INSTALL_PATH="$TARGET_DIR/$APP_NAME.app"
 echo "==> Installing to $INSTALL_PATH..."
+pkill -x "$EXECUTABLE_NAME" 2>/dev/null || true
 rm -rf "$INSTALL_PATH"
 ditto "$APP_BUNDLE" "$INSTALL_PATH"
 

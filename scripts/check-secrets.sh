@@ -25,7 +25,7 @@ fi
 for file in "${FILES[@]}"; do
   # 1. Forbid committed local persistence state or raw HTML dumps
   case "$file" in
-    *state.json|*GetReport*.html|*GetReport*.cfm*|*.env|*.pem|*.key)
+    *state.json|*saved-link.json|*GetReport*.html|*GetReport*.cfm*|*.env|*.pem|*.key)
       echo "[FAIL] Forbidden state or secret file tracked: $file" >&2
       VIOLATIONS=$((VIOLATIONS + 1))
       ;;

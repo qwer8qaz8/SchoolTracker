@@ -20,6 +20,7 @@ public enum RenWebReportParser {
         }
 
         let lowerHTML = trimmed.lowercased()
+        let explicitExpiresAt = parseExplicitExpirationDate(from: trimmed)
 
         // 1. Check for structured <div class="course-section"> layout (synthetic fixtures & modern markup)
         if lowerHTML.contains("course-section") {
@@ -29,13 +30,16 @@ public enum RenWebReportParser {
                     .reportParseSuccess,
                     context: "layout=course-section courses=\(courses.count)"
                 )
-                return ImportedGradeReport(courses: courses)
+                return ImportedGradeReport(expiresAt: explicitExpiresAt, courses: courses)
             }
         }
 
         // 2. Check for live ColdFusion GetReport.cfm multi-table layout
-        let coldFusionReport = parseColdFusionTables(from: trimmed)
+        var coldFusionReport = parseColdFusionTables(from: trimmed)
         if !coldFusionReport.courses.isEmpty {
+            if coldFusionReport.expiresAt == nil {
+                coldFusionReport.expiresAt = explicitExpiresAt
+            }
             SchoolTrackerTelemetry.shared.increment(
                 .reportParseSuccess,
                 context: "layout=coldfusion-tables courses=\(coldFusionReport.courses.count)"
@@ -63,6 +67,33 @@ public enum RenWebReportParser {
             return true
         }
         return false
+    }
+
+    private static func parseExplicitExpirationDate(from html: String) -> Date? {
+        if let attrValue = extractFirstSubstring(in: html, after: "data-expires=\"", before: "\""),
+           let isoDate = ISO8601DateFormatter().date(from: attrValue)
+        {
+            return isoDate
+        }
+
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?:link\s+expires|expires\s+on|valid\s+through)\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+        let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
+        guard let match = regex.firstMatch(in: html, options: [], range: nsRange),
+              let dateRange = Range(match.range(at: 1), in: html)
+        else {
+            return nil
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "MM/dd/yyyy"
+        return formatter.date(from: String(html[dateRange]))
     }
 
     // MARK: - Path A: <div class="course-section"> Parser

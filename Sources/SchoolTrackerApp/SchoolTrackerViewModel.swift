@@ -63,6 +63,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
     @Published public var isPresentingNewTaskSheet: Bool = false
     @Published public var importURLInput: String = ""
     @Published public private(set) var importState: ImportSheetState = .idle
+    @Published public private(set) var isSyncingSavedLink: Bool = false
     @Published public var persistenceBannerError: String?
 
     // Course Detail filter state
@@ -88,7 +89,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
         self.client = client
     }
 
-    // MARK: - Computed Summaries
+    // MARK: - Computed Summaries & Saved Link Expiration
 
     public var overallAverageText: String {
         guard let avg = state.overallAverage else { return "—" }
@@ -106,6 +107,18 @@ public final class SchoolTrackerViewModel: ObservableObject {
 
     public var pendingTasksCount: Int {
         state.tasks.filter { !$0.isCompleted }.count
+    }
+
+    public var hasSavedLink: Bool {
+        state.savedLink != nil
+    }
+
+    public var savedLinkExpirationStatus: SavedLinkExpirationStatus? {
+        state.savedLink?.expirationStatus()
+    }
+
+    public var savedLinkExpirationSummary: String? {
+        state.savedLink?.expirationSummaryText()
     }
 
     public var filteredTasks: [TrackedTask] {
@@ -173,7 +186,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
     }
 
     private func refreshLoadState() {
-        if state.courses.isEmpty && state.tasks.isEmpty {
+        if state.courses.isEmpty && state.tasks.isEmpty && state.savedLink == nil {
             loadState = .empty
         } else {
             loadState = .loaded
@@ -190,7 +203,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
         }
     }
 
-    // MARK: - RenWeb Temporary Email Link Import
+    // MARK: - RenWeb Temporary Email Link Import & Saved Link Sync
 
     public func openImportSheet() {
         if case .success = importState {
@@ -224,10 +237,60 @@ public final class SchoolTrackerViewModel: ObservableObject {
             return
         }
 
-        importState = .fetching(
-            redactedURL: validatedLink.redactedDescription,
-            district: validatedLink.district
-        )
+        await performReportSync(using: validatedLink, updateSheetState: true)
+    }
+
+    public func syncSavedLink() async {
+        guard !isSyncingSavedLink else { return }
+
+        let savedCredential: ValidatedRenWebLink?
+        do {
+            savedCredential = try store.loadSavedRenWebLink()
+        } catch {
+            persistenceBannerError = error.localizedDescription
+            if isPresentingImportSheet {
+                importState = .failure(error.localizedDescription)
+            }
+            return
+        }
+
+        guard let validatedLink = savedCredential else {
+            let message = "No saved RenWeb link is available. Paste a temporary report link to save it."
+            persistenceBannerError = message
+            if isPresentingImportSheet {
+                importState = .failure(message)
+            }
+            return
+        }
+
+        isSyncingSavedLink = true
+        defer { isSyncingSavedLink = false }
+
+        await performReportSync(using: validatedLink, updateSheetState: isPresentingImportSheet)
+    }
+
+    public func clearSavedLink() {
+        do {
+            try store.clearSavedRenWebLink()
+            state = try store.loadState()
+            persistenceBannerError = nil
+            if case .failure = importState {
+                importState = .idle
+            }
+            refreshLoadState()
+        } catch {
+            persistenceBannerError = error.localizedDescription
+        }
+    }
+
+    private func performReportSync(using validatedLink: ValidatedRenWebLink, updateSheetState: Bool) async {
+        persistenceBannerError = nil
+        if updateSheetState {
+            importState = .fetching(
+                redactedURL: validatedLink.redactedDescription,
+                district: validatedLink.district
+            )
+        }
 
         do {
             let report = try await client.importReport(from: validatedLink)
@@ -235,11 +298,13 @@ public final class SchoolTrackerViewModel: ObservableObject {
             state = updatedState
             refreshLoadState()
             let assignmentCount = report.courses.reduce(0) { $0 + $1.assignments.count }
-            importState = .success(
-                courseCount: report.courses.count,
-                assignmentCount: assignmentCount,
-                district: validatedLink.district
-            )
+            if updateSheetState {
+                importState = .success(
+                    courseCount: report.courses.count,
+                    assignmentCount: assignmentCount,
+                    district: validatedLink.district
+                )
+            }
             if selectedSection == nil {
                 selectedSection = .overview
             } else if case .course(let selectedID) = selectedSection,
@@ -247,9 +312,29 @@ public final class SchoolTrackerViewModel: ObservableObject {
                 selectedSection = .overview
             }
         } catch let error as RenWebError {
-            importState = .failure(error.localizedDescription)
+            if error == .expiredOrInvalidSession {
+                if let currentSaved = try? store.loadSavedRenWebLink(),
+                   currentSaved.sessionID == validatedLink.sessionID {
+                    if let updatedSaved = try? store.markSavedLinkExpired() {
+                        state.savedLink = updatedSaved
+                    }
+                } else if state.savedLink != nil && !updateSheetState {
+                    if let updatedSaved = try? store.markSavedLinkExpired() {
+                        state.savedLink = updatedSaved
+                    }
+                }
+            }
+            if updateSheetState {
+                importState = .failure(error.localizedDescription)
+            } else {
+                persistenceBannerError = error.localizedDescription
+            }
         } catch {
-            importState = .failure(error.localizedDescription)
+            if updateSheetState {
+                importState = .failure(error.localizedDescription)
+            } else {
+                persistenceBannerError = error.localizedDescription
+            }
         }
     }
 
@@ -316,6 +401,30 @@ public final class SchoolTrackerViewModel: ObservableObject {
         case 80..<90: return .blue
         case 70..<80: return .orange
         default: return .red
+        }
+    }
+
+    public static func expirationStatusColor(for status: SavedLinkExpirationStatus?) -> Color {
+        guard let status else { return .secondary }
+        switch status {
+        case .active:
+            return .green
+        case .expiringSoon:
+            return .orange
+        case .expired:
+            return .red
+        }
+    }
+
+    public static func expirationStatusIcon(for status: SavedLinkExpirationStatus?) -> String {
+        guard let status else { return "link" }
+        switch status {
+        case .active:
+            return "checkmark.seal.fill"
+        case .expiringSoon:
+            return "clock.badge.exclamationmark"
+        case .expired:
+            return "exclamationmark.triangle.fill"
         }
     }
 }

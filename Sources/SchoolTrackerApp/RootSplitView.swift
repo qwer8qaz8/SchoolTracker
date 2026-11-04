@@ -7,13 +7,21 @@ struct RootSplitView: View {
     var body: some View {
         NavigationSplitView {
             SidebarView(viewModel: viewModel)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 255, max: 330)
         } detail: {
             VStack(spacing: 0) {
                 if let bannerError = viewModel.persistenceBannerError {
-                    PersistenceErrorBanner(message: bannerError) {
-                        viewModel.persistenceBannerError = nil
-                    }
+                    PersistenceErrorBanner(
+                        message: bannerError,
+                        showReplaceLinkAction: viewModel.savedLinkExpirationStatus?.isExpired == true,
+                        onReplaceLink: {
+                            viewModel.persistenceBannerError = nil
+                            viewModel.openImportSheet()
+                        },
+                        onDismiss: {
+                            viewModel.persistenceBannerError = nil
+                        }
+                    )
                 }
 
                 detailContent
@@ -28,13 +36,32 @@ struct RootSplitView: View {
                     }
                     .help("Add a study task or assignment reminder")
 
+                    if viewModel.hasSavedLink {
+                        Button {
+                            Task {
+                                await viewModel.syncSavedLink()
+                            }
+                        } label: {
+                            if viewModel.isSyncingSavedLink {
+                                Label("Syncing…", systemImage: "arrow.triangle.2.circlepath")
+                            } else {
+                                Label("Sync Saved Link", systemImage: "arrow.triangle.2.circlepath")
+                            }
+                        }
+                        .disabled(viewModel.isSyncingSavedLink)
+                        .help("Fetch the latest grades using your saved FACTS/RenWeb link (⌘R)")
+                    }
+
                     Button {
                         viewModel.openImportSheet()
                     } label: {
-                        Label("Import RenWeb Link", systemImage: "link.badge.plus")
+                        Label(
+                            viewModel.hasSavedLink ? "Saved Link…" : "Import RenWeb Link",
+                            systemImage: viewModel.hasSavedLink ? "link.circle.fill" : "link.badge.plus"
+                        )
                     }
                     .buttonStyle(.borderedProminent)
-                    .help("Import grades from a temporary FACTS/RenWeb GetReport.cfm email link")
+                    .help("Save, replace, or inspect your temporary FACTS/RenWeb GetReport.cfm email link")
                 }
             }
         }
@@ -125,16 +152,62 @@ private struct SidebarView: View {
                 }
             }
 
-            if let syncedAt = viewModel.state.lastSyncedAt {
-                Section("Last Sync") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let district = viewModel.state.lastSyncedDistrict {
-                            Label("District: \(district)", systemImage: "building.columns")
-                                .font(.caption.weight(.medium))
+            Section("Saved Report Link") {
+                if let savedLink = viewModel.state.savedLink {
+                    let status = savedLink.expirationStatus()
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: SchoolTrackerViewModel.expirationStatusIcon(for: status))
+                                .foregroundStyle(SchoolTrackerViewModel.expirationStatusColor(for: status))
+                            Text("District: \(savedLink.district)")
+                                .font(.caption.weight(.semibold))
                         }
-                        Text(syncedAt.formatted(date: .abbreviated, time: .shortened))
-                            .font(.caption2)
+
+                        Text(savedLink.expirationSummaryText())
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(SchoolTrackerViewModel.expirationStatusColor(for: status))
+
+                        if let syncedAt = viewModel.state.lastSyncedAt {
+                            Text("Synced \(syncedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HStack(spacing: 8) {
+                            Button {
+                                Task {
+                                    await viewModel.syncSavedLink()
+                                }
+                            } label: {
+                                Text(viewModel.isSyncingSavedLink ? "Syncing…" : "Sync Now")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .disabled(viewModel.isSyncingSavedLink)
+
+                            Button {
+                                viewModel.openImportSheet()
+                            } label: {
+                                Text(status.isExpired ? "Replace" : "Manage")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.borderless)
+                            .controlSize(.mini)
+                        }
+                        .padding(.top, 2)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("No link saved")
+                            .font(.caption.weight(.medium))
                             .foregroundStyle(.secondary)
+                        Button("Save RenWeb Link…") {
+                            viewModel.openImportSheet()
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption2)
                     }
                     .padding(.vertical, 2)
                 }
@@ -182,7 +255,7 @@ private struct AppLoadingStateView: View {
                 .controlSize(.large)
             Text("Loading local school tracker state…")
                 .font(.headline)
-            Text("Reading courses and tasks from Application Support.")
+            Text("Reading courses, tasks, and saved link metadata from Application Support.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -234,7 +307,7 @@ private struct AppEmptyStateView: View {
             VStack(spacing: 6) {
                 Text("No Courses or Tasks Yet")
                     .font(.title2.weight(.semibold))
-                Text("Paste a temporary FACTS/RenWeb GetReport.cfm email link to pull your current courses, category weights, and assignment grades, or add your first task manually.")
+                Text("Paste a temporary FACTS/RenWeb GetReport.cfm email link to save it in the app, track when it expires, and pull your current grades.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -243,7 +316,7 @@ private struct AppEmptyStateView: View {
 
             HStack(spacing: 12) {
                 Button(action: onImportRenWeb) {
-                    Label("Import RenWeb Email Link", systemImage: "link.badge.plus")
+                    Label("Save & Import RenWeb Link", systemImage: "link.badge.plus")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -261,6 +334,8 @@ private struct AppEmptyStateView: View {
 
 private struct PersistenceErrorBanner: View {
     let message: String
+    let showReplaceLinkAction: Bool
+    let onReplaceLink: () -> Void
     let onDismiss: () -> Void
 
     var body: some View {
@@ -271,6 +346,11 @@ private struct PersistenceErrorBanner: View {
                 .font(.callout)
                 .lineLimit(2)
             Spacer()
+            if showReplaceLinkAction {
+                Button("Replace Expired Link…", action: onReplaceLink)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
             Button("Dismiss", action: onDismiss)
                 .buttonStyle(.borderless)
                 .font(.caption.weight(.semibold))

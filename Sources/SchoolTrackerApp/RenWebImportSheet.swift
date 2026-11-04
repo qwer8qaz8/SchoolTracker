@@ -12,9 +12,13 @@ struct RenWebImportSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             sheetHeader
 
+            if let savedLink = viewModel.state.savedLink {
+                savedLinkSection(savedLink)
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Temporary Report Link (`GetReport.cfm`)")
+                    Text(viewModel.hasSavedLink ? "Replace Saved Link (`GetReport.cfm`)" : "Temporary Report Link (`GetReport.cfm`)")
                         .font(.subheadline.weight(.medium))
                     Spacer()
                     Button {
@@ -26,13 +30,13 @@ struct RenWebImportSheet: View {
                             .font(.caption)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(viewModel.importState.isBusy)
+                    .disabled(viewModel.importState.isBusy || viewModel.isSyncingSavedLink)
                 }
 
                 TextField(placeholderURL, text: $viewModel.importURLInput)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
-                    .disabled(viewModel.importState.isBusy)
+                    .disabled(viewModel.importState.isBusy || viewModel.isSyncingSavedLink)
 
                 liveValidationIndicator
             }
@@ -46,7 +50,7 @@ struct RenWebImportSheet: View {
             footerButtons
         }
         .padding(24)
-        .frame(width: 560)
+        .frame(width: 580)
     }
 
     private var sheetHeader: some View {
@@ -55,13 +59,80 @@ struct RenWebImportSheet: View {
                 .font(.title2)
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Import FACTS / RenWeb Email Report")
+                Text("Saved FACTS / RenWeb Report Link")
                     .font(.title3.weight(.bold))
-                Text("Paste the temporary GetReport.cfm link from your school progress report email.")
+                Text("Save your temporary GetReport.cfm email link to track when it expires and sync grades in one click.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func savedLinkSection(_ savedLink: SavedRenWebLink) -> some View {
+        let status = savedLink.expirationStatus()
+        let statusColor = SchoolTrackerViewModel.expirationStatusColor(for: status)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: SchoolTrackerViewModel.expirationStatusIcon(for: status))
+                    .foregroundStyle(statusColor)
+                Text("Current Saved Link · District \(savedLink.district)")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(savedLink.expirationSummaryText())
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(statusColor.opacity(0.15), in: Capsule())
+                    .foregroundStyle(statusColor)
+            }
+
+            Text(savedLink.redactedURL)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 12) {
+                Text("Saved \(savedLink.savedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("Expires \(savedLink.expiresAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    Task {
+                        await viewModel.syncSavedLink()
+                    }
+                } label: {
+                    Label(
+                        viewModel.isSyncingSavedLink ? "Syncing…" : "Sync Saved Link Now",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
+                    .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(viewModel.importState.isBusy || viewModel.isSyncingSavedLink)
+
+                Button(role: .destructive) {
+                    viewModel.clearSavedLink()
+                } label: {
+                    Label("Clear Link", systemImage: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(viewModel.importState.isBusy || viewModel.isSyncingSavedLink)
+            }
+        }
+        .padding(12)
+        .background(statusColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(statusColor.opacity(0.3), lineWidth: 1)
+        )
     }
 
     @ViewBuilder
@@ -135,11 +206,17 @@ struct RenWebImportSheet: View {
                     .font(.title2)
                     .foregroundStyle(.green)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Imported \(courseCount) courses and \(assignmentCount) assignments (\(district))")
+                    Text("Synced \(courseCount) courses and \(assignmentCount) assignments (\(district))")
                         .font(.callout.weight(.semibold))
-                    Text("Grades saved to local Application Support with SessionID redacted.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let summary = viewModel.savedLinkExpirationSummary {
+                        Text("Link saved in app · \(summary)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Grades and link saved to local Application Support with SessionID redacted in state.json.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .padding(12)
@@ -152,7 +229,7 @@ struct RenWebImportSheet: View {
                     .font(.title3)
                     .foregroundStyle(.red)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Import Failed")
+                    Text("Sync / Import Failed")
                         .font(.callout.weight(.semibold))
                     Text(reason)
                         .font(.caption)
@@ -176,7 +253,7 @@ struct RenWebImportSheet: View {
             Image(systemName: "lock.fill")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Security: Ephemeral non-caching URLSession. Raw SessionID tokens and HTML are never logged or committed.")
+            Text("Security: Saved locally in owner-only saved-link.json (0600); state.json and logs always mask SessionID=REDACTED.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -188,7 +265,7 @@ struct RenWebImportSheet: View {
                 dismiss()
             }
             .keyboardShortcut(.cancelAction)
-            .disabled(viewModel.importState.isBusy)
+            .disabled(viewModel.importState.isBusy || viewModel.isSyncingSavedLink)
 
             Spacer()
 
@@ -204,11 +281,12 @@ struct RenWebImportSheet: View {
                         await viewModel.importFromRenWebLink()
                     }
                 } label: {
-                    Label("Fetch & Import Grades", systemImage: "arrow.down.doc.fill")
+                    Label("Save Link & Import Grades", systemImage: "arrow.down.doc.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(
                     viewModel.importState.isBusy ||
+                    viewModel.isSyncingSavedLink ||
                     viewModel.importURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
                 .keyboardShortcut(.defaultAction)

@@ -310,6 +310,113 @@ final class SchoolTrackerCoreTests: XCTestCase {
         XCTAssertEqual(merged.tasks.count, 1)
     }
 
+    func testSavedRenWebLinkExpirationStatuses() {
+        let savedAt = Date(timeIntervalSince1970: 1_762_000_000)
+        let expiresAt = savedAt.addingTimeInterval(SavedRenWebLink.defaultTTL)
+        var savedLink = SavedRenWebLink(
+            district: AnonymizedReportFixtures.validDistrict,
+            redactedURL: "https://test-xx.client.factsmgt.com/renweb/email/GetReport.cfm?District=TEST-XX&SessionID=REDACTED",
+            savedAt: savedAt,
+            expiresAt: expiresAt,
+            lastVerifiedAt: savedAt,
+            isConfirmedExpired: false
+        )
+
+        // 1. Active state (> 48 hours remaining: 10 days left)
+        let tenDaysLeftDate = savedAt.addingTimeInterval(4 * 86_400)
+        let activeStatus = savedLink.expirationStatus(referenceDate: tenDaysLeftDate)
+        if case let .active(daysRemaining, _, statusExpiresAt) = activeStatus {
+            XCTAssertEqual(daysRemaining, 10)
+            XCTAssertEqual(statusExpiresAt, expiresAt)
+        } else {
+            XCTFail("Expected .active status, got \(activeStatus)")
+        }
+        XCTAssertFalse(savedLink.expirationSummaryText(referenceDate: tenDaysLeftDate).isEmpty)
+
+        // 2. Expiring soon state (<= 48 hours remaining: 36 hours left)
+        let thirtySixHoursLeftDate = expiresAt.addingTimeInterval(-36 * 3_600)
+        let soonStatus = savedLink.expirationStatus(referenceDate: thirtySixHoursLeftDate)
+        if case let .expiringSoon(hoursRemaining, statusExpiresAt) = soonStatus {
+            XCTAssertEqual(hoursRemaining, 36)
+            XCTAssertEqual(statusExpiresAt, expiresAt)
+        } else {
+            XCTFail("Expected .expiringSoon status, got \(soonStatus)")
+        }
+        XCTAssertFalse(savedLink.expirationSummaryText(referenceDate: thirtySixHoursLeftDate).isEmpty)
+
+        // 3. Expired by clock (referenceDate >= expiresAt)
+        let pastExpiryDate = expiresAt.addingTimeInterval(3_600)
+        let clockExpiredStatus = savedLink.expirationStatus(referenceDate: pastExpiryDate)
+        XCTAssertEqual(clockExpiredStatus, .expired(expiresAt: expiresAt, confirmedByServer: false))
+        XCTAssertFalse(savedLink.expirationSummaryText(referenceDate: pastExpiryDate).isEmpty)
+
+        // 4. Expired confirmed by server (.expiredOrInvalidSession before clock expiry)
+        savedLink.isConfirmedExpired = true
+        let serverExpiredStatus = savedLink.expirationStatus(referenceDate: tenDaysLeftDate)
+        XCTAssertEqual(serverExpiredStatus, .expired(expiresAt: expiresAt, confirmedByServer: true))
+    }
+
+    func testSavedLinkCredentialStoreRoundTripPermissionsAndClear() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SchoolTrackerSavedLinkTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let stateURL = tempDir.appendingPathComponent("state.json", isDirectory: false)
+        let store = SchoolTrackerStore(stateFileURL: stateURL)
+
+        XCTAssertNil(try store.loadSavedRenWebLink())
+
+        let link = try RenWebLinkParser.parse(AnonymizedReportFixtures.validReportURL)
+        let savedAt = Date(timeIntervalSince1970: 1_762_000_000)
+        let expiresAt = savedAt.addingTimeInterval(SavedRenWebLink.defaultTTL)
+
+        let savedMetadata = try store.saveRenWebLink(link, savedAt: savedAt, expiresAt: expiresAt)
+        XCTAssertEqual(savedMetadata.district, AnonymizedReportFixtures.validDistrict)
+        XCTAssertEqual(savedMetadata.savedAt, savedAt)
+        XCTAssertEqual(savedMetadata.expiresAt, expiresAt)
+        XCTAssertFalse(savedMetadata.redactedURL.contains(AnonymizedReportFixtures.validSessionID))
+        XCTAssertTrue(savedMetadata.redactedURL.contains("REDACTED"))
+
+        // Verify credential file exists with 0600 owner-only permissions and round-trips the ValidatedRenWebLink
+        let credentialPath = store.savedLinkCredentialFileURL.path
+        XCTAssertTrue(FileManager.default.fileExists(atPath: credentialPath))
+        let attrs = try FileManager.default.attributesOfItem(atPath: credentialPath)
+        if let perms = attrs[.posixPermissions] as? NSNumber {
+            XCTAssertEqual(perms.intValue & 0o777, 0o600)
+        }
+
+        let loadedLink = try store.loadSavedRenWebLink()
+        XCTAssertEqual(loadedLink, link)
+
+        // Verify state.json never contains the raw SessionID
+        let rawStateJSON = try String(contentsOf: stateURL, encoding: .utf8)
+        XCTAssertFalse(rawStateJSON.contains(AnonymizedReportFixtures.validSessionID))
+        XCTAssertTrue(rawStateJSON.contains("REDACTED"))
+
+        // Re-syncing the same session via applyImportedReport preserves original savedAt and expiresAt
+        let report = try RenWebReportParser.parse(html: AnonymizedReportFixtures.coldFusionMultiTableReportHTML)
+        let resyncDate = savedAt.addingTimeInterval(7_200)
+        let stateAfterResync = try store.applyImportedReport(report, from: link, syncedAt: resyncDate)
+        XCTAssertEqual(stateAfterResync.savedLink?.savedAt, savedAt)
+        XCTAssertEqual(stateAfterResync.savedLink?.expiresAt, expiresAt)
+        XCTAssertEqual(stateAfterResync.savedLink?.lastVerifiedAt, resyncDate)
+
+        // Marking the saved link expired flips isConfirmedExpired = true
+        let expiredAt = resyncDate.addingTimeInterval(600)
+        let expiredMeta = try store.markSavedLinkExpired(at: expiredAt)
+        XCTAssertEqual(expiredMeta?.isConfirmedExpired, true)
+        XCTAssertEqual(
+            expiredMeta?.expirationStatus(referenceDate: expiredAt),
+            .expired(expiresAt: expiresAt, confirmedByServer: true)
+        )
+
+        // Clearing the saved link removes saved-link.json and clears state.savedLink
+        try store.clearSavedRenWebLink()
+        XCTAssertNil(try store.loadSavedRenWebLink())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: credentialPath))
+        XCTAssertNil(try store.loadState().savedLink)
+    }
+
     // MARK: - 6. Working Tree Secret & PII Audit
 
     func testRepositoryWorkingTreeContainsNoLiveTokens() throws {
@@ -375,6 +482,8 @@ struct StandaloneTestRunner {
             ("testLargeReportPayloadScalesLinearly", suite.testLargeReportPayloadScalesLinearly),
             ("testSchoolTrackerStoreRoundTripAndRedaction", suite.testSchoolTrackerStoreRoundTripAndRedaction),
             ("testSchoolTrackerStoreReimportPreservesCourseIDsAndAssignmentCompletion", suite.testSchoolTrackerStoreReimportPreservesCourseIDsAndAssignmentCompletion),
+            ("testSavedRenWebLinkExpirationStatuses", suite.testSavedRenWebLinkExpirationStatuses),
+            ("testSavedLinkCredentialStoreRoundTripPermissionsAndClear", suite.testSavedLinkCredentialStoreRoundTripPermissionsAndClear),
             ("testRepositoryWorkingTreeContainsNoLiveTokens", suite.testRepositoryWorkingTreeContainsNoLiveTokens)
         ]
         let asyncTests: [(String, () async throws -> Void)] = [

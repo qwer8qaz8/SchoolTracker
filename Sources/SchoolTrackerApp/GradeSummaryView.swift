@@ -16,6 +16,8 @@ struct GradeSummaryView: View {
             VStack(alignment: .leading, spacing: 24) {
                 headerSection
 
+                savedLinkStatusCard
+
                 LazyVGrid(columns: metricColumns, spacing: 14) {
                     SummaryMetricCard(
                         title: "Overall Average",
@@ -48,10 +50,6 @@ struct GradeSummaryView: View {
                 }
 
                 coursesSection
-
-                if let redactedURL = viewModel.state.lastRedactedReportURL {
-                    syncMetadataFooter(redactedURL: redactedURL)
-                }
             }
             .padding(24)
         }
@@ -68,12 +66,108 @@ struct GradeSummaryView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("Import a temporary FACTS/RenWeb email report link to populate live course grades.")
+                    Text("Save a temporary FACTS/RenWeb email report link to pull live course grades and track link expiry.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
             }
             Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var savedLinkStatusCard: some View {
+        if let savedLink = viewModel.state.savedLink {
+            let status = savedLink.expirationStatus()
+            let statusColor = SchoolTrackerViewModel.expirationStatusColor(for: status)
+            HStack(alignment: .center, spacing: 14) {
+                Image(systemName: SchoolTrackerViewModel.expirationStatusIcon(for: status))
+                    .font(.title2)
+                    .foregroundStyle(statusColor)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text("Saved RenWeb Report Link (\(savedLink.district))")
+                            .font(.subheadline.weight(.semibold))
+                        Text(savedLink.expirationSummaryText())
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(statusColor.opacity(0.15), in: Capsule())
+                            .foregroundStyle(statusColor)
+                    }
+
+                    Text("Redacted URL: \(savedLink.redactedURL) · Saved \(savedLink.savedAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer()
+
+                HStack(spacing: 8) {
+                    Button {
+                        Task {
+                            await viewModel.syncSavedLink()
+                        }
+                    } label: {
+                        if viewModel.isSyncingSavedLink {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Syncing…")
+                            }
+                        } else {
+                            Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(viewModel.isSyncingSavedLink)
+
+                    Button(status.isExpired ? "Replace Link…" : "Manage…") {
+                        viewModel.openImportSheet()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button(role: .destructive) {
+                        viewModel.clearSavedLink()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove saved RenWeb link from this Mac")
+                }
+            }
+            .padding(14)
+            .background(statusColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(statusColor.opacity(0.3), lineWidth: 1)
+            )
+        } else {
+            HStack(spacing: 12) {
+                Image(systemName: "link.badge.plus")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("No RenWeb Report Link Saved")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Save a temporary GetReport.cfm email link to see its 14-day expiration countdown and refresh grades in one click.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Save Link…") {
+                    viewModel.openImportSheet()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            .padding(14)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
         }
     }
 
@@ -90,13 +184,24 @@ struct GradeSummaryView: View {
                         .foregroundStyle(.secondary)
                     Text("No courses imported yet")
                         .font(.subheadline.weight(.medium))
-                    Text("Use 'Import RenWeb Link' in the toolbar to pull your latest course report.")
+                    Text("Sync your saved RenWeb link or paste a fresh temporary report link to load course grades.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button("Import RenWeb Link") {
-                        viewModel.openImportSheet()
+                    HStack(spacing: 10) {
+                        if viewModel.hasSavedLink {
+                            Button("Sync Saved Link") {
+                                Task {
+                                    await viewModel.syncSavedLink()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(viewModel.isSyncingSavedLink)
+                        }
+                        Button(viewModel.hasSavedLink ? "Replace Link…" : "Import RenWeb Link") {
+                            viewModel.openImportSheet()
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(28)
@@ -114,21 +219,6 @@ struct GradeSummaryView: View {
                 }
             }
         }
-    }
-
-    private func syncMetadataFooter(redactedURL: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "lock.shield")
-                .foregroundStyle(.secondary)
-            Text("Redacted source: \(redactedURL)")
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

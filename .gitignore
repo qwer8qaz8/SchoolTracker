@@ -22,6 +22,7 @@ DerivedData/
 
 # Local runtime state & student data (never commit)
 state.json
+saved-link.json
 *.sqlite
 *.sqlite3
 *.db

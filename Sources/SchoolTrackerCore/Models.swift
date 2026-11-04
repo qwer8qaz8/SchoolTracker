@@ -198,17 +198,20 @@ public struct ImportedGradeReport: Codable, Equatable, Hashable, Sendable {
     public var term: String?
     public var schoolYear: String?
     public var fetchedAt: Date
+    public var expiresAt: Date?
     public var courses: [ImportedCourse]
 
     public init(
         term: String? = nil,
         schoolYear: String? = nil,
         fetchedAt: Date = Date(),
+        expiresAt: Date? = nil,
         courses: [ImportedCourse]
     ) {
         self.term = term
         self.schoolYear = schoolYear
         self.fetchedAt = fetchedAt
+        self.expiresAt = expiresAt
         self.courses = courses
     }
 
@@ -216,6 +219,92 @@ public struct ImportedGradeReport: Codable, Equatable, Hashable, Sendable {
         let validAverages = courses.compactMap(\.numericAverage)
         guard !validAverages.isEmpty else { return nil }
         return validAverages.reduce(0, +) / Double(validAverages.count)
+    }
+}
+
+// MARK: - Saved Temporary Link & Expiration Tracking
+
+public enum SavedLinkExpirationStatus: Equatable, Hashable, Sendable {
+    case active(daysRemaining: Int, hoursRemaining: Int, expiresAt: Date)
+    case expiringSoon(hoursRemaining: Int, expiresAt: Date)
+    case expired(expiresAt: Date, confirmedByServer: Bool)
+
+    public var isExpired: Bool {
+        if case .expired = self { return true }
+        return false
+    }
+}
+
+public struct SavedRenWebLink: Codable, Equatable, Hashable, Sendable {
+    /// Default FACTS/RenWeb temporary email report link lifetime (14 days).
+    public static let defaultTTL: TimeInterval = 14 * 86_400
+    public static let expiringSoonThreshold: TimeInterval = 48 * 3_600
+
+    public var district: String
+    public var redactedURL: String
+    public var savedAt: Date
+    public var expiresAt: Date
+    public var lastVerifiedAt: Date?
+    public var isConfirmedExpired: Bool
+
+    public init(
+        district: String,
+        redactedURL: String,
+        savedAt: Date = Date(),
+        expiresAt: Date? = nil,
+        lastVerifiedAt: Date? = nil,
+        isConfirmedExpired: Bool = false
+    ) {
+        self.district = district
+        self.redactedURL = SchoolTrackerTelemetry.redactSensitiveTokens(in: redactedURL)
+        self.savedAt = savedAt
+        self.expiresAt = expiresAt ?? savedAt.addingTimeInterval(Self.defaultTTL)
+        self.lastVerifiedAt = lastVerifiedAt ?? savedAt
+        self.isConfirmedExpired = isConfirmedExpired
+    }
+
+    public func expirationStatus(referenceDate: Date = Date()) -> SavedLinkExpirationStatus {
+        if isConfirmedExpired {
+            return .expired(expiresAt: expiresAt, confirmedByServer: true)
+        }
+        let remaining = expiresAt.timeIntervalSince(referenceDate)
+        guard remaining > 0 else {
+            return .expired(expiresAt: expiresAt, confirmedByServer: false)
+        }
+        let totalHours = max(1, Int(ceil(remaining / 3_600.0)))
+        if remaining <= Self.expiringSoonThreshold {
+            return .expiringSoon(hoursRemaining: totalHours, expiresAt: expiresAt)
+        }
+        let days = Int(floor(remaining / 86_400.0))
+        let leftoverHours = Int(floor((remaining - Double(days) * 86_400.0) / 3_600.0))
+        return .active(daysRemaining: days, hoursRemaining: leftoverHours, expiresAt: expiresAt)
+    }
+
+    public func expirationSummaryText(referenceDate: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        let formattedDate = formatter.string(from: expiresAt)
+
+        switch expirationStatus(referenceDate: referenceDate) {
+        case .active(let daysRemaining, let hoursRemaining, _):
+            if daysRemaining >= 1 {
+                let dayUnit = daysRemaining == 1 ? "day" : "days"
+                if hoursRemaining > 0 {
+                    return "Active (\(daysRemaining) \(dayUnit), \(hoursRemaining)h left, expires \(formattedDate))"
+                }
+                return "Active (\(daysRemaining) \(dayUnit) left, expires \(formattedDate))"
+            }
+            return "Active (\(max(1, hoursRemaining))h left, expires \(formattedDate))"
+        case .expiringSoon(let hoursRemaining, _):
+            let hourUnit = hoursRemaining == 1 ? "hour" : "hours"
+            return "Expiring soon (\(hoursRemaining) \(hourUnit) left, expires \(formattedDate))"
+        case .expired(_, let confirmedByServer):
+            if confirmedByServer {
+                return "Expired (confirmed by FACTS/RenWeb server)"
+            }
+            return "Expired on \(formattedDate)"
+        }
     }
 }
 
@@ -253,19 +342,22 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
     public var lastSyncedAt: Date?
     public var lastSyncedDistrict: String?
     public var lastRedactedReportURL: String?
+    public var savedLink: SavedRenWebLink?
 
     public init(
         courses: [ImportedCourse] = [],
         tasks: [TrackedTask] = [],
         lastSyncedAt: Date? = nil,
         lastSyncedDistrict: String? = nil,
-        lastRedactedReportURL: String? = nil
+        lastRedactedReportURL: String? = nil,
+        savedLink: SavedRenWebLink? = nil
     ) {
         self.courses = courses
         self.tasks = tasks
         self.lastSyncedAt = lastSyncedAt
         self.lastSyncedDistrict = lastSyncedDistrict
         self.lastRedactedReportURL = lastRedactedReportURL
+        self.savedLink = savedLink
     }
 
     public var overallAverage: Double? {

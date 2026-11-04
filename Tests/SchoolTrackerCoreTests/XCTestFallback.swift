@@ -91,6 +91,22 @@ public func XCTAssertEqual<T: FloatingPoint>(
     }
 }
 
+public func XCTAssertNil(
+    _ expression: @autoclosure () throws -> Any?,
+    _ message: @autoclosure () -> String = "",
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    do {
+        if let value = try expression() {
+            let msg = message()
+            XCTFail(msg.isEmpty ? "XCTAssertNil failed: (\(value)) is not nil" : msg, file: file, line: line)
+        }
+    } catch {
+        XCTFail("Unexpected error thrown: \(error)", file: file, line: line)
+    }
+}
+
 public func XCTAssertNotNil(
     _ expression: @autoclosure () throws -> Any?,
     _ message: @autoclosure () -> String = "",

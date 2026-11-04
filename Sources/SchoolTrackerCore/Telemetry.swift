@@ -15,6 +15,12 @@ public enum TelemetryMetric: String, CaseIterable, Sendable {
     case stateLoadFailure = "persistence.state.load.failure"
     case stateSaveSuccess = "persistence.state.save.success"
     case stateSaveFailure = "persistence.state.save.failure"
+    case savedLinkSaveSuccess = "persistence.saved_link.save.success"
+    case savedLinkSaveFailure = "persistence.saved_link.save.failure"
+    case savedLinkLoadSuccess = "persistence.saved_link.load.success"
+    case savedLinkLoadFailure = "persistence.saved_link.load.failure"
+    case savedLinkMarkedExpired = "persistence.saved_link.marked_expired"
+    case savedLinkCleared = "persistence.saved_link.cleared"
 }
 
 public final class SchoolTrackerTelemetry: @unchecked Sendable {
