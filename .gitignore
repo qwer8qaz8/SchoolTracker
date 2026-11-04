@@ -1,0 +1,40 @@
+# macOS & Finder
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Swift Package Manager & Xcode
+.build/
+.swiftpm/
+Packages/
+xcuserdata/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+*.moved-aside
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xccheckout
+*.profraw
+
+# Local runtime state & student data (never commit)
+state.json
+*.sqlite
+*.sqlite3
+*.db
+*GetReport*.html
+*GetReport*.cfm*
+raw-reports/
+Application\ Support/
+
+# Secrets & credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.cer
+*.mobileprovision
