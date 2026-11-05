@@ -25,41 +25,353 @@ public enum TranscriptParseError: Error, Equatable, LocalizedError, Sendable {
 }
 
 public enum LocalTranscriptParser {
-    /// Parses transcript or report card text on-device into a TermSnapshot and list of ImportedCourse.
+    /// Parses transcript or report card text on-device into a primary TermSnapshot, list of ImportedCourse, and all historical snapshots.
     /// Elementary/middle school courses (grades 1–8) and non-academic courses (Homeroom, Chapel, etc.)
     /// are parsed with `countsTowardGraduation = false` and `countsTowardGPA = false`, awarding 0.0 credits.
+    public static func parseTranscriptTextFull(
+        _ text: String,
+        defaultSchoolYear: String = "2026-2027",
+        defaultTerm: String = "Semester 1",
+        filterElementaryCourses: Bool = false
+    ) throws -> (snapshot: TermSnapshot, courses: [ImportedCourse], allSnapshots: [TermSnapshot]) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw TranscriptParseError.noTextFound
+        }
+
+        // Strategy 1: Multi-year FACTS SIS Transcript export (e.g. "FACTS SIS_ Family Portal.pdf")
+        if let factsResult = parseFactsSISTranscript(trimmed, filterElementaryCourses: filterElementaryCourses) {
+            return factsResult
+        }
+
+        // Strategy 2: RenWeb / FACTS Report Card (e.g. "Report.pdf", handles line-wrapping across table cells)
+        if let reportResult = parseRenWebReportCard(trimmed, filterElementaryCourses: filterElementaryCourses) {
+            return reportResult
+        }
+
+        // Strategy 3: Tabular / flexible line-by-line fallback
+        return try parseTabularTranscript(
+            trimmed,
+            defaultSchoolYear: defaultSchoolYear,
+            defaultTerm: defaultTerm,
+            filterElementaryCourses: filterElementaryCourses
+        )
+    }
+
+    /// Convenience wrapper returning (snapshot, courses) for backwards compatibility.
     public static func parseTranscriptText(
         _ text: String,
         defaultSchoolYear: String = "2026-2027",
         defaultTerm: String = "Semester 1",
         filterElementaryCourses: Bool = false
     ) throws -> (snapshot: TermSnapshot, courses: [ImportedCourse]) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw TranscriptParseError.noTextFound
+        let full = try parseTranscriptTextFull(
+            text,
+            defaultSchoolYear: defaultSchoolYear,
+            defaultTerm: defaultTerm,
+            filterElementaryCourses: filterElementaryCourses
+        )
+        return (full.snapshot, full.courses)
+    }
+
+    // MARK: - Strategy 1: FACTS SIS Multi-Year Transcript Parser
+
+    private static func parseFactsSISTranscript(
+        _ text: String,
+        filterElementaryCourses: Bool
+    ) -> (snapshot: TermSnapshot, courses: [ImportedCourse], allSnapshots: [TermSnapshot])? {
+        guard text.contains("Transcripts") || text.range(of: #"20\d{2}-20\d{2}\s+(?:Sem|Semester|Q|Quarter)\s+\d+"#, options: .regularExpression) != nil else {
+            return nil
         }
 
-        let schoolYear = extractSchoolYear(from: trimmed) ?? defaultSchoolYear
-        let termName = extractTermName(from: trimmed) ?? defaultTerm
+        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let yearPrefixRegex = try? NSRegularExpression(pattern: #"^(20\d{2}-20\d{2})\s+(Sem\s+\d+|Q\d+|Quarter\s+\d+|Semester\s+\d+)\s+"#),
+              let fullRowRegex = try? NSRegularExpression(pattern: #"^(20\d{2}-20\d{2})\s+(Sem\s+\d+|Q\d+|Quarter\s+\d+|Semester\s+\d+)\s+(.+?)\s+([0-9]{1,3}(?:\.[0-9]+)?|[A-DFP][+-]?)\s+([0-9]+\.[0-9]{1,4}|[01](?:\.0+)?)\s+(.+)$"#)
+        else { return nil }
 
-        let rawLines = trimmed.components(separatedBy: .newlines)
+        struct Row {
+            let year: String
+            let term: String
+            let course: String
+            let grade: Double?
+            let letter: String?
+            let credits: Double
+            let teacher: String
+        }
+
+        var rows: [Row] = []
+        var idx = 0
+        while idx < lines.count {
+            var line = lines[idx]
+            let ns = line as NSString
+            if yearPrefixRegex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) != nil {
+                while idx + 1 < lines.count {
+                    let next = lines[idx + 1]
+                    if next.isEmpty || next.hasPrefix("11/5/26") || next.hasPrefix("https://") || next.contains("Transcripts") || next.contains("Credits Earned") || yearPrefixRegex.firstMatch(in: next, range: NSRange(location: 0, length: (next as NSString).length)) != nil {
+                        break
+                    }
+                    line += " " + next
+                    idx += 1
+                }
+                let nsRow = line as NSString
+                if let m = fullRowRegex.firstMatch(in: line, range: NSRange(location: 0, length: nsRow.length)) {
+                    let year = nsRow.substring(with: m.range(at: 1))
+                    let term = normalizeTermString(nsRow.substring(with: m.range(at: 2)))
+                    let course = nsRow.substring(with: m.range(at: 3)).trimmingCharacters(in: .whitespaces)
+                    let gradeStr = nsRow.substring(with: m.range(at: 4))
+                    let creditStr = nsRow.substring(with: m.range(at: 5))
+                    let teacher = nsRow.substring(with: m.range(at: 6)).trimmingCharacters(in: .whitespaces)
+
+                    let num = Double(gradeStr)
+                    let letter = num == nil ? gradeStr : GPACalculator.letterGrade(for: num!)
+                    let credits = Double(creditStr) ?? 0.50
+                    rows.append(Row(year: year, term: term, course: course, grade: num, letter: letter, credits: credits, teacher: teacher))
+                }
+            }
+            idx += 1
+        }
+
+        guard !rows.isEmpty else { return nil }
+
+        // Group rows into chronological terms
+        var termKeys: [String] = []
+        var termBuckets: [String: [Row]] = [:]
+        for r in rows {
+            let key = "\(r.year)||\(r.term)"
+            if termBuckets[key] == nil {
+                termKeys.append(key)
+            }
+            termBuckets[key, default: []].append(r)
+        }
+
+        var allSnapshots: [TermSnapshot] = []
+        for key in termKeys {
+            let parts = key.components(separatedBy: "||")
+            let schoolYear = parts[0]
+            let termName = parts[1]
+            let bucketRows = termBuckets[key] ?? []
+
+            var importedCourses: [ImportedCourse] = []
+            for r in bucketRows {
+                let isExcluded = ImportedCourse.isExcludedFromHighSchool(
+                    courseName: r.course,
+                    courseCode: nil,
+                    term: r.term,
+                    schoolYear: r.year
+                )
+                let tier = CourseWeightTier.inferTier(courseName: r.course, courseCode: nil)
+                let c = ImportedCourse(
+                    courseName: r.course,
+                    courseCode: nil,
+                    teacherName: r.teacher.isEmpty ? nil : r.teacher,
+                    term: r.term,
+                    numericAverage: r.grade,
+                    letterGrade: r.letter,
+                    weightTier: tier,
+                    creditHours: isExcluded ? 0.0 : r.credits,
+                    countsTowardGraduation: !isExcluded,
+                    countsTowardGPA: !isExcluded
+                )
+                importedCourses.append(c)
+            }
+
+            if filterElementaryCourses {
+                importedCourses = importedCourses.filter { $0.countsTowardGraduation || $0.countsTowardGPA }
+            }
+
+            let gpa = GPACalculator.calculateGPA(for: importedCourses)
+            let snapshot = TermSnapshot(
+                schoolYear: schoolYear,
+                termName: termName,
+                syncedAt: Date(),
+                gpaSummary: gpa,
+                courses: importedCourses,
+                source: "facts-sis-transcript"
+            )
+            allSnapshots.append(snapshot)
+        }
+
+        guard !allSnapshots.isEmpty else { return nil }
+
+        // Liam is in high school (9th grade in 2024-2025, 10th in 2025-2026, 11th in 2026-2027)
+        // Set the primary snapshot to the most recent high school term
+        let hsSnapshots = allSnapshots.filter { $0.schoolYear >= "2024-2025" }
+        let primarySnapshot = hsSnapshots.last ?? allSnapshots.last!
+
+        return (snapshot: primarySnapshot, courses: primarySnapshot.courses, allSnapshots: allSnapshots)
+    }
+
+    // MARK: - Strategy 2: RenWeb / FACTS Report Card Parser
+
+    private static func parseRenWebReportCard(
+        _ text: String,
+        filterElementaryCourses: Bool
+    ) -> (snapshot: TermSnapshot, courses: [ImportedCourse], allSnapshots: [TermSnapshot])? {
+        let lower = text.lowercased()
+        guard lower.contains("report card") || lower.contains("fourtermsemnoconduct") || lower.contains("rse name") || lower.contains("semester 1") else {
+            return nil
+        }
+
+        var schoolYear = "2026-2027"
+        var termName = "Quarter 2"
+        let yearTermRegex = try? NSRegularExpression(pattern: #"(20\d{2}-20\d{2})\s*[-–—]\s*(Q[1-4]|Quarter\s*[1-4]|Sem\s*[12]|Semester\s*[12])"#, options: [.caseInsensitive])
+        let nsText = text as NSString
+        if let m = yearTermRegex?.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)) {
+            schoolYear = nsText.substring(with: m.range(at: 1))
+            termName = normalizeTermString(nsText.substring(with: m.range(at: 2)))
+        }
+
+        let rawLines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+
+        guard let startIdx = rawLines.firstIndex(where: {
+            $0.contains("SEMESTER 1") || $0.contains("RSE NAME") || $0.contains("COURSE") || $0.contains("GRADE")
+        }) else { return nil }
+
+        let endIdx = rawLines.firstIndex(where: {
+            $0.contains("School Days") || ($0.contains("Total") && $0.contains("1 2 3 4")) || $0.contains("Times Tardy")
+        }) ?? rawLines.count
+
+        var idx = startIdx + 1
+        while idx < endIdx && (rawLines[idx].contains("EXAM") || rawLines[idx].contains("GRADE") || rawLines[idx].contains("SEMESTER") || rawLines[idx].contains("FINAL")) {
+            idx += 1
+        }
+
+        var mergedLines: [String] = []
+        while idx < endIdx {
+            let current = rawLines[idx]
+            if current.hasPrefix("1 2 3 4") || current.hasPrefix("School Days") { break }
+
+            if idx + 1 < endIdx {
+                let next = rawLines[idx + 1]
+                let endsWithScorePattern = #"^(?:[A-Z]{1,4}\s+)?([0-9]{1,3}(?:\.[0-9]+)?|[A-DFP][+-]?)$"#
+                let hasNumberInCurrent = current.range(of: #"[0-9]{1,3}"#, options: .regularExpression) != nil
+                if next.range(of: endsWithScorePattern, options: .regularExpression) != nil && !hasNumberInCurrent {
+                    mergedLines.append(current + " " + next)
+                    idx += 2
+                    continue
+                }
+            }
+            mergedLines.append(current)
+            idx += 1
+        }
+
+        guard let courseScoreRegex = try? NSRegularExpression(pattern: #"^([A-Z0-9\s\.\-\/\&]+?)\s+([0-9]{1,3}(?:\.[0-9]+)?|[A-DFP][+-]?)$"#) else {
+            return nil
+        }
+
+        var courses: [ImportedCourse] = []
+        var currentName: String?
+        var currentGrade: Double?
+        var currentLetter: String?
+        var teacherLines: [String] = []
+
+        func commit() {
+            guard let name = currentName else { return }
+            let rawTeacher = teacherLines.joined(separator: " ")
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: "M RS.", with: "Mrs.")
+                .replacingOccurrences(of: "M R .", with: "Mr.")
+                .replacingOccurrences(of: "MISS R OUNDEY", with: "Miss Roundey")
+                .replacingOccurrences(of: "M R. ", with: "Mr. ")
+                .replacingOccurrences(of: "MRS.", with: "Mrs.")
+                .replacingOccurrences(of: "MR.", with: "Mr.")
+                .replacingOccurrences(of: "MS.", with: "Ms.")
+                .trimmingCharacters(in: .whitespaces)
+
+            let isExcluded = ImportedCourse.isExcludedFromHighSchool(
+                courseName: name,
+                courseCode: nil,
+                term: termName,
+                schoolYear: schoolYear
+            )
+            let tier = CourseWeightTier.inferTier(courseName: name, courseCode: nil)
+
+            let course = ImportedCourse(
+                courseName: name,
+                courseCode: nil,
+                teacherName: rawTeacher.isEmpty ? nil : rawTeacher,
+                term: termName,
+                numericAverage: currentGrade,
+                letterGrade: currentLetter ?? (currentGrade.map { GPACalculator.letterGrade(for: $0) }),
+                weightTier: tier,
+                creditHours: isExcluded ? 0.0 : GPACalculator.defaultSemesterCourseCredit,
+                countsTowardGraduation: !isExcluded,
+                countsTowardGPA: !isExcluded
+            )
+            courses.append(course)
+            currentName = nil
+            currentGrade = nil
+            currentLetter = nil
+            teacherLines = []
+        }
+
+        for l in mergedLines {
+            let ns = l as NSString
+            if let match = courseScoreRegex.firstMatch(in: l, range: NSRange(location: 0, length: ns.length)) {
+                commit()
+                let rawCourse = ns.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
+                let scoreStr = ns.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespaces)
+                let cleanedName = rawCourse
+                    .replacingOccurrences(of: "CO RE", with: "CORE")
+                    .replacingOccurrences(of: "HISTO RY", with: "HISTORY")
+                currentName = cleanedName
+                if let num = Double(scoreStr) {
+                    currentGrade = num
+                    currentLetter = nil
+                } else {
+                    currentGrade = nil
+                    currentLetter = scoreStr
+                }
+            } else {
+                teacherLines.append(l)
+            }
+        }
+        commit()
+
+        if filterElementaryCourses {
+            courses = courses.filter { $0.countsTowardGraduation || $0.countsTowardGPA }
+        }
+
+        guard !courses.isEmpty else { return nil }
+
+        let gpa = GPACalculator.calculateGPA(for: courses)
+        let snapshot = TermSnapshot(
+            schoolYear: schoolYear,
+            termName: termName,
+            syncedAt: Date(),
+            gpaSummary: gpa,
+            courses: courses,
+            source: "renweb-report-card"
+        )
+
+        return (snapshot: snapshot, courses: courses, allSnapshots: [snapshot])
+    }
+
+    // MARK: - Strategy 3: Tabular / Flexible Lines Parser
+
+    private static func parseTabularTranscript(
+        _ text: String,
+        defaultSchoolYear: String,
+        defaultTerm: String,
+        filterElementaryCourses: Bool
+    ) throws -> (snapshot: TermSnapshot, courses: [ImportedCourse], allSnapshots: [TermSnapshot]) {
+        let schoolYear = extractSchoolYear(from: text) ?? defaultSchoolYear
+        let termName = extractTermName(from: text) ?? defaultTerm
+
+        let rawLines = text.components(separatedBy: .newlines)
         var courses: [ImportedCourse] = []
         var currentSectionHeader: String? = nil
 
-        // Section header pattern for grades/levels (e.g. "1st Grade - 2015-2016", "Grade 1", "Middle School")
         let sectionHeaderPattern = try! NSRegularExpression(
             pattern: #"^\s*(?:=+\s*|--+\s*)?(?:(kindergarten|pre-?k|elementary|middle\s+school|high\s+school)|(?:grade\s*([0-9]{1,2}))|(?:(1st|2nd|3rd|[4-9]th|1[0-2]th)\s+grade))\b"#,
             options: [.caseInsensitive]
         )
 
-        // Pattern 1: Tabular format: Code (optional) | Name | Grade | Credits (optional) | Tier (optional)
-        // e.g. "THEO 11      Christian Doctrine III          94.0   0.50     Regular"
         let tabularPattern = try! NSRegularExpression(
             pattern: #"^\s*([A-Z]{2,8}(?:\s+[0-9A-ZIV]+)?)\s{2,}(.+?)\s{2,}([0-9]{1,3}(?:\.[0-9]+)?%?)(?:\s+([0-9]+(?:\.[0-9]+)?))?(?:\s+([A-Za-z\.\/\s]+))?$"#,
             options: [.anchorsMatchLines]
         )
 
-        // Pattern 2: Flexible code/name + grade e.g. "Math 184 - Calculus I: 95.0%" or "Biology H 88.0"
         let flexiblePattern = try! NSRegularExpression(
             pattern: #"^\s*(?:([A-Z]{2,8}(?:\s+[0-9A-ZIV]+)?)\s*[-:]\s*)?([A-Za-z0-9\s\/\(\)]+?)\s*(?:[-:]|\s{2,}|\t)\s*([0-9]{1,3}(?:\.[0-9]+)?%?)(?:\s+([0-9]+(?:\.[0-9]+)?))?"#,
             options: [.anchorsMatchLines]
@@ -82,7 +394,6 @@ public enum LocalTranscriptParser {
             let nsLine = line as NSString
             let fullRange = NSRange(location: 0, length: nsLine.length)
 
-            // Check if this line is a section header (e.g. "1st Grade (2015-2016)" or "Grade 9")
             if sectionHeaderPattern.firstMatch(in: line, options: [], range: fullRange) != nil {
                 currentSectionHeader = lineTrimmed
             }
@@ -98,7 +409,8 @@ public enum LocalTranscriptParser {
                     let isExcluded = ImportedCourse.isExcludedFromHighSchool(
                         courseName: name,
                         courseCode: code,
-                        term: currentSectionHeader ?? termName
+                        term: currentSectionHeader ?? termName,
+                        schoolYear: schoolYear
                     )
                     let tier = resolveWeightTier(tierString: tierStr, courseName: name, courseCode: code)
                     let explicitCredits = creditStr.flatMap(Double.init)
@@ -135,7 +447,8 @@ public enum LocalTranscriptParser {
                     let isExcluded = ImportedCourse.isExcludedFromHighSchool(
                         courseName: name,
                         courseCode: code,
-                        term: currentSectionHeader ?? termName
+                        term: currentSectionHeader ?? termName,
+                        schoolYear: schoolYear
                     )
                     let tier = CourseWeightTier.inferTier(courseName: name, courseCode: code)
                     let explicitCredits = creditStr.flatMap(Double.init)
@@ -174,7 +487,7 @@ public enum LocalTranscriptParser {
             source: "local-transcript"
         )
 
-        return (snapshot, courses)
+        return (snapshot: snapshot, courses: courses, allSnapshots: [snapshot])
     }
 
     /// Extracts text from PDF using PDFKit, falling back to Vision OCR if pages are scanned bitmaps.
@@ -195,7 +508,6 @@ public enum LocalTranscriptParser {
             if let str = page.string, str.trimmingCharacters(in: .whitespacesAndNewlines).count > 40 {
                 fullText += str + "\n"
             } else {
-                // Scanned page: render to image and use Vision OCR
                 let bounds = page.bounds(for: .mediaBox)
                 let renderer = ImageRenderer(bounds: bounds)
                 if let cgImage = renderer.render(page: page) {
@@ -230,7 +542,7 @@ public enum LocalTranscriptParser {
     }
 
     /// Parses an input document file (PDF or image) completely on-device.
-    public static func parseDocument(at fileURL: URL) throws -> (snapshot: TermSnapshot, courses: [ImportedCourse]) {
+    public static func parseDocument(at fileURL: URL) throws -> (snapshot: TermSnapshot, courses: [ImportedCourse], allSnapshots: [TermSnapshot]) {
         let ext = fileURL.pathExtension.lowercased()
         let text: String
 
@@ -247,24 +559,48 @@ public enum LocalTranscriptParser {
             text = try String(contentsOf: fileURL, encoding: .utf8)
         }
 
-        return try parseTranscriptText(text)
+        return try parseTranscriptTextFull(text)
+    }
+
+    private static func normalizeTermString(_ term: String) -> String {
+        let t = term.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("Sem ") {
+            return "Semester " + t.dropFirst(4)
+        }
+        if t.hasPrefix("Q") && t.count <= 3 {
+            return "Quarter " + t.dropFirst(1)
+        }
+        return t
     }
 
     private static func extractSchoolYear(from text: String) -> String? {
-        let pattern = try! NSRegularExpression(pattern: #"School Year:\s*([0-9]{4}-[0-9]{4})"#, options: [.caseInsensitive])
+        let patterns = [
+            #"School Year:\s*([0-9]{4}-[0-9]{4})"#,
+            #"(20[0-9]{2}-20[0-9]{2})\s*[-–—]\s*(?:Q|Quarter|Sem|Semester)"#,
+            #"Year:\s*(20[0-9]{2}-20[0-9]{2})"#
+        ]
         let ns = text as NSString
-        if let match = pattern.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)) {
-            return ns.substring(with: match.range(at: 1))
+        for pat in patterns {
+            if let regex = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]),
+               let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)) {
+                return ns.substring(with: match.range(at: 1))
+            }
         }
         return nil
     }
 
     private static func extractTermName(from text: String) -> String? {
-        let pattern = try! NSRegularExpression(pattern: #"Term:\s*([A-Za-z0-9\s]+?)(?:\||\n|$)"#, options: [.caseInsensitive])
+        let patterns = [
+            #"Term:\s*([A-Za-z0-9\s]+?)(?:\||\n|$)"#,
+            #"[-–—]\s*(Q[1-4]|Quarter\s*[1-4]|Sem\s*[12]|Semester\s*[12])"#
+        ]
         let ns = text as NSString
-        if let match = pattern.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)) {
-            let raw = ns.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !raw.isEmpty { return raw }
+        for pat in patterns {
+            if let regex = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]),
+               let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)) {
+                let raw = ns.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !raw.isEmpty { return normalizeTermString(raw) }
+            }
         }
         return nil
     }

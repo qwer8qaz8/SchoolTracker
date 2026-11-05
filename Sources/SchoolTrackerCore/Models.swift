@@ -262,8 +262,15 @@ public struct ImportedCourse: Codable, Equatable, Hashable, Identifiable, Sendab
     }
 
     /// Evaluates if a course is elementary or middle school coursework (Grades 1–8, Kindergarten, etc.).
-    public static func isElementaryOrMiddleSchool(name: String, code: String? = nil, term: String? = nil) -> Bool {
-        let combined = "\(name) \(code ?? "") \(term ?? "")".lowercased()
+    public static func isElementaryOrMiddleSchool(name: String, code: String? = nil, term: String? = nil, schoolYear: String? = nil) -> Bool {
+        if let year = schoolYear?.trimmingCharacters(in: .whitespacesAndNewlines),
+           year.range(of: #"^20\d{2}-20\d{2}$"#, options: .regularExpression) != nil {
+            if year < "2024-2025" {
+                return true
+            }
+        }
+
+        let combined = "\(name) \(code ?? "") \(term ?? "") \(schoolYear ?? "")".lowercased()
 
         // Elementary & Middle School grades (1st through 8th)
         let gradePattern = #"\b(?:1st|2nd|3rd|[4-8]th|first|second|third|fourth|fifth|sixth|seventh|eighth)\s+grade\b"#
@@ -320,8 +327,8 @@ public struct ImportedCourse: Codable, Equatable, Hashable, Identifiable, Sendab
     }
 
     /// Evaluates if a course should be excluded from high school credits and GPA calculation.
-    public static func isExcludedFromHighSchool(courseName: String, courseCode: String? = nil, term: String? = nil) -> Bool {
-        isElementaryOrMiddleSchool(name: courseName, code: courseCode, term: term)
+    public static func isExcludedFromHighSchool(courseName: String, courseCode: String? = nil, term: String? = nil, schoolYear: String? = nil) -> Bool {
+        isElementaryOrMiddleSchool(name: courseName, code: courseCode, term: term, schoolYear: schoolYear)
             || isNonAcademicOrAdministrative(name: courseName, code: courseCode)
     }
 

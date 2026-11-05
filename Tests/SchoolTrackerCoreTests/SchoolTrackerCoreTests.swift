@@ -813,6 +813,96 @@ final class SchoolTrackerCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.gpaSummary.earnedCredits, 1.0, accuracy: 0.01)
         XCTAssertEqual(snapshot.gpaSummary.totalCreditsAttempted, 1.0, accuracy: 0.01)
     }
+
+    func testFACTSSISTranscriptParsingAndMultiYearSnapshots() throws {
+        let text = """
+        Student
+        Transcripts
+        Year Name Course Grade Credits Earned Instructor
+        2016-2017 Sem 1 Art 98 1.000 Teacher, Elementary
+        2016-2017 Sem 1 Handwriting 88 1.000 Teacher, Elementary
+        2024-2025 Sem 1 Algebra 1 Honors 88 0.500 Instructor, Math
+        2024-2025 Sem 1 English I Ancient
+        Literature
+        89 0.500 Instructor, English
+        2025-2026 Sem 2 Geometry Honors 84 0.500 Instructor, Math
+        2025-2026 Sem 2 Choir P 0.500 Instructor, Music
+        """
+
+        let result = try LocalTranscriptParser.parseTranscriptTextFull(text)
+        XCTAssertEqual(result.allSnapshots.count, 3)
+
+        // Primary snapshot should be latest high school term (2025-2026 Semester 2)
+        XCTAssertEqual(result.snapshot.schoolYear, "2025-2026")
+        XCTAssertEqual(result.snapshot.termName, "Semester 2")
+
+        // Check elementary course exclusion
+        let elemSnapshot = result.allSnapshots.first(where: { $0.schoolYear == "2016-2017" })
+        XCTAssertNotNil(elemSnapshot)
+        for c in elemSnapshot!.courses {
+            XCTAssertFalse(c.countsTowardGraduation)
+            XCTAssertFalse(c.countsTowardGPA)
+            XCTAssertEqual(c.creditHours, 0.0)
+        }
+
+        // Check high school course credits
+        let hs2024Snapshot = result.allSnapshots.first(where: { $0.schoolYear == "2024-2025" })
+        XCTAssertNotNil(hs2024Snapshot)
+        let eng = hs2024Snapshot!.courses.first(where: { $0.courseName.contains("English I Ancient Literature") })
+        XCTAssertNotNil(eng)
+        XCTAssertEqual(eng!.numericAverage, 89.0)
+        XCTAssertEqual(eng!.creditHours, 0.50)
+        XCTAssertTrue(eng!.countsTowardGraduation)
+    }
+
+    func testRenWebReportCardParsingWithSplitLinesAndTeachers() throws {
+        let text = """
+        FAITH LUTHERAN SCHOOL
+        REPORT CARD
+        2026-2027 - Q2
+        COURSE NAME
+        SEMESTER 1 SEMESTER 2 FINAL
+        1 2 EXAM GRADE 3 4 EXAM GRADE GRADE
+        ALGEBRA 2 91
+        MRS.
+        MILDRED
+        CHOIR P
+        MISS ROUNDEY
+        ENGLISH III CO
+        RE 85
+        MR.
+        MERRITT
+        U.S. HISTO
+        RY 87
+        MR.
+        MERRITT
+        1 2 3 4 Total
+        School Days 0 0 0 0 0
+        """
+
+        let result = try LocalTranscriptParser.parseTranscriptTextFull(text)
+        XCTAssertEqual(result.snapshot.schoolYear, "2026-2027")
+        XCTAssertEqual(result.snapshot.termName, "Quarter 2")
+        XCTAssertEqual(result.courses.count, 4)
+
+        let alg = result.courses.first(where: { $0.courseName == "ALGEBRA 2" })
+        XCTAssertNotNil(alg)
+        XCTAssertEqual(alg!.numericAverage, 91.0)
+        XCTAssertEqual(alg!.teacherName, "Mrs. MILDRED")
+
+        let choir = result.courses.first(where: { $0.courseName == "CHOIR" })
+        XCTAssertNotNil(choir)
+        XCTAssertEqual(choir!.letterGrade, "P")
+
+        let eng = result.courses.first(where: { $0.courseName == "ENGLISH III CORE" })
+        XCTAssertNotNil(eng)
+        XCTAssertEqual(eng!.numericAverage, 85.0)
+        XCTAssertEqual(eng!.teacherName, "Mr. MERRITT")
+
+        let usHist = result.courses.first(where: { $0.courseName == "U.S. HISTORY" })
+        XCTAssertNotNil(usHist)
+        XCTAssertEqual(usHist!.numericAverage, 87.0)
+    }
 }
 
 #if STANDALONE_TEST_RUNNER && !canImport(XCTest)
@@ -844,7 +934,9 @@ struct StandaloneTestRunner {
             ("testAcademicHistoryStoreMultiQuarterPersistenceAndExports", suite.testAcademicHistoryStoreMultiQuarterPersistenceAndExports),
             ("testLocalTranscriptTextParsingAndTierInference", suite.testLocalTranscriptTextParsingAndTierInference),
             ("testElementaryAndNonAcademicCoursesExcludedFromHighSchoolCreditsAndGPA", suite.testElementaryAndNonAcademicCoursesExcludedFromHighSchoolCreditsAndGPA),
-            ("testLocalTranscriptParserExcludesElementaryCourses", suite.testLocalTranscriptParserExcludesElementaryCourses)
+            ("testLocalTranscriptParserExcludesElementaryCourses", suite.testLocalTranscriptParserExcludesElementaryCourses),
+            ("testFACTSSISTranscriptParsingAndMultiYearSnapshots", suite.testFACTSSISTranscriptParsingAndMultiYearSnapshots),
+            ("testRenWebReportCardParsingWithSplitLinesAndTeachers", suite.testRenWebReportCardParsingWithSplitLinesAndTeachers)
         ]
         let asyncTests: [(String, () async throws -> Void)] = [
             ("testConcurrentLinkValidationAndReportParsing", suite.testConcurrentLinkValidationAndReportParsing),

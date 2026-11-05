@@ -118,6 +118,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
     @Published public var draftTranscriptTermName: String = "Semester 1"
     @Published public var draftTranscriptMergeCourses: Bool = true
     @Published public var draftTranscriptFilterNonHighSchool: Bool = false
+    @Published public var draftTranscriptAdditionalSnapshots: [TermSnapshot] = []
 
     // New Task Sheet draft state
     @Published public var draftTaskTitle: String = ""
@@ -338,7 +339,13 @@ public final class SchoolTrackerViewModel: ObservableObject {
 
     public func commitTranscriptSnapshot(_ snapshot: TermSnapshot, mergeIntoCurrentCourses: Bool) {
         do {
+            for additional in draftTranscriptAdditionalSnapshots {
+                if additional.schoolYear != snapshot.schoolYear || additional.termName != snapshot.termName {
+                    _ = try store.applyTranscriptSnapshot(additional, mergeIntoCurrentCourses: false)
+                }
+            }
             state = try store.applyTranscriptSnapshot(snapshot, mergeIntoCurrentCourses: mergeIntoCurrentCourses)
+            draftTranscriptAdditionalSnapshots = []
             refreshLoadState()
             SpotlightIndexManager.indexState(state)
         } catch {

@@ -7,7 +7,7 @@ public enum TranscriptImportSheetState: Equatable {
     case idle
     case processing(filename: String)
     case preview(snapshot: TermSnapshot, courses: [ImportedCourse], rawTextSnippet: String)
-    case success(termName: String, courseCount: Int)
+    case success(termName: String, courseCount: Int, totalTerms: Int = 1, totalCourses: Int = 0)
     case error(String)
 }
 
@@ -33,8 +33,8 @@ public struct TranscriptImportSheet: View {
                         processingView(filename: filename)
                     case .preview(let snapshot, let courses, let rawSnippet):
                         previewView(snapshot: snapshot, courses: courses, rawSnippet: rawSnippet)
-                    case .success(let termName, let courseCount):
-                        successView(termName: termName, courseCount: courseCount)
+                    case .success(let termName, let courseCount, let totalTerms, let totalCourses):
+                        successView(termName: termName, courseCount: courseCount, totalTerms: totalTerms, totalCourses: totalCourses)
                     case .error(let message):
                         errorView(message: message)
                     }
@@ -204,6 +204,15 @@ public struct TranscriptImportSheet: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+
+                    if viewModel.draftTranscriptAdditionalSnapshots.count > 1 {
+                        HStack(spacing: 8) {
+                            LiquidGlassBadge("Multi-Term Transcript: \(viewModel.draftTranscriptAdditionalSnapshots.count) terms", systemImage: "archivebox.fill", tint: .indigo)
+                            Text("All historical terms will be saved into Academic History.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
 
@@ -344,16 +353,23 @@ public struct TranscriptImportSheet: View {
 
     // MARK: - Success View
 
-    private func successView(termName: String, courseCount: Int) -> some View {
+    private func successView(termName: String, courseCount: Int, totalTerms: Int, totalCourses: Int) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.green)
-            Text("Transcript Saved Successfully")
+            Text(totalTerms > 1 ? "Entire School Career Imported" : "Transcript Saved Successfully")
                 .font(.headline)
-            Text("Archived \(courseCount) courses for \(termName) into Academic History.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            if totalTerms > 1 {
+                Text("Archived \(totalCourses) courses across \(totalTerms) terms into Academic History. High school GPA and graduation credits are active.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else {
+                Text("Archived \(courseCount) courses for \(termName) into Academic History.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
 
             Button("Done") {
                 viewModel.transcriptImportState = .idle
@@ -427,8 +443,18 @@ public struct TranscriptImportSheet: View {
                     snapshot.courses = courses
                     snapshot.gpaSummary = GPACalculator.calculateGPA(for: courses)
 
+                    let totalTerms = viewModel.draftTranscriptAdditionalSnapshots.isEmpty ? 1 : viewModel.draftTranscriptAdditionalSnapshots.count
+                    let totalCourses = viewModel.draftTranscriptAdditionalSnapshots.isEmpty
+                        ? courses.count
+                        : viewModel.draftTranscriptAdditionalSnapshots.reduce(0) { $0 + $1.courses.count }
+
                     viewModel.commitTranscriptSnapshot(snapshot, mergeIntoCurrentCourses: viewModel.draftTranscriptMergeCourses)
-                    viewModel.transcriptImportState = .success(termName: snapshot.termName, courseCount: courses.count)
+                    viewModel.transcriptImportState = .success(
+                        termName: snapshot.termName,
+                        courseCount: courses.count,
+                        totalTerms: totalTerms,
+                        totalCourses: totalCourses
+                    )
                 } label: {
                     Text("Save to Academic History")
                 }
@@ -479,6 +505,7 @@ public struct TranscriptImportSheet: View {
                 await MainActor.run {
                     self.viewModel.draftTranscriptSchoolYear = result.snapshot.schoolYear
                     self.viewModel.draftTranscriptTermName = result.snapshot.termName
+                    self.viewModel.draftTranscriptAdditionalSnapshots = result.allSnapshots
                     self.viewModel.transcriptImportState = .preview(
                         snapshot: result.snapshot,
                         courses: result.courses,
