@@ -4,6 +4,8 @@ import SchoolTrackerCore
 
 public enum SidebarSection: Hashable, Identifiable {
     case overview
+    case gpa
+    case history
     case tasks
     case calendar(FamilyPortalCalendarCategory)
     case course(UUID)
@@ -12,6 +14,10 @@ public enum SidebarSection: Hashable, Identifiable {
         switch self {
         case .overview:
             return "overview"
+        case .gpa:
+            return "gpa"
+        case .history:
+            return "history"
         case .tasks:
             return "tasks"
         case .calendar(let category):
@@ -81,6 +87,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
     @Published public var isPresentingNewTaskSheet: Bool = false
     @Published public var isPresentingCalendarSubscriptionSheet: Bool = false
     @Published public var isPresentingNewCalendarEventSheet: Bool = false
+    @Published public var isPresentingTranscriptImportSheet: Bool = false
     @Published public var importURLInput: String = ""
     @Published public private(set) var importState: ImportSheetState = .idle
     @Published public private(set) var isSyncingSavedLink: Bool = false
@@ -89,6 +96,27 @@ public final class SchoolTrackerViewModel: ObservableObject {
     // Course Detail filter state
     @Published public var courseAssignmentFilter: String = ""
     @Published public var courseSelectedCategory: String = "All"
+
+    // FLHS GPA Dashboard state
+    @Published public var isShowingHandbookScale: Bool = false
+    @Published public var isShowingSnapshotConfirmation: Bool = false
+    @Published public var snapshotSuccessMessage: String?
+
+    // Academic History view state
+    @Published public var selectedHistorySnapshotID: UUID?
+    @Published public var historySearchText: String = ""
+    @Published public var historySelectedYearFilter: String = "All"
+    @Published public var isShowingHistoryDeleteAlert: Bool = false
+    @Published public var historySnapshotToDelete: TermSnapshot?
+    @Published public var historyExportNotificationMessage: String?
+    @Published public var isShowingHistoryExportNotification: Bool = false
+
+    // Transcript Import Sheet state
+    @Published public var transcriptImportState: TranscriptImportSheetState = .idle
+    @Published public var isTargetedForTranscriptDrop: Bool = false
+    @Published public var draftTranscriptSchoolYear: String = "2026-2027"
+    @Published public var draftTranscriptTermName: String = "Semester 1"
+    @Published public var draftTranscriptMergeCourses: Bool = true
 
     // New Task Sheet draft state
     @Published public var draftTaskTitle: String = ""
@@ -251,9 +279,81 @@ public final class SchoolTrackerViewModel: ObservableObject {
             try store.saveState(state)
             persistenceBannerError = nil
             refreshLoadState()
+            SpotlightIndexManager.indexState(state)
         } catch {
             persistenceBannerError = error.localizedDescription
         }
+    }
+
+    // MARK: - FLHS GPA, Weight Tiers & Academic History
+
+    public var gpaSummary: GPASummary {
+        GPACalculator.calculateGPA(for: state.courses)
+    }
+
+    public func setCourseWeightTier(courseID: UUID, tier: CourseWeightTier?) {
+        guard let idx = state.courses.firstIndex(where: { $0.id == courseID }) else { return }
+        state.courses[idx].weightTier = tier
+        persistCurrentState()
+    }
+
+    public func openTranscriptImportSheet() {
+        isPresentingTranscriptImportSheet = true
+    }
+
+    @discardableResult
+    public func snapshotCurrentTerm(termName: String? = nil, schoolYear: String? = nil) -> TermSnapshot {
+        do {
+            let snapshot = try store.snapshotCurrentTerm(termName: termName, schoolYear: schoolYear)
+            state = try store.loadState()
+            SpotlightIndexManager.indexState(state)
+            return snapshot
+        } catch {
+            let fallbackSummary = GPACalculator.calculateGPA(for: state.courses)
+            let fallbackSnapshot = TermSnapshot(
+                schoolYear: schoolYear ?? "2026-2027",
+                termName: termName ?? state.courses.compactMap(\.term).first ?? "Current Term",
+                gpaSummary: fallbackSummary,
+                courses: state.courses,
+                source: "manual"
+            )
+            state.academicHistory.append(fallbackSnapshot)
+            persistCurrentState()
+            return fallbackSnapshot
+        }
+    }
+
+    public func commitTranscriptSnapshot(_ snapshot: TermSnapshot, mergeIntoCurrentCourses: Bool) {
+        do {
+            state = try store.applyTranscriptSnapshot(snapshot, mergeIntoCurrentCourses: mergeIntoCurrentCourses)
+            refreshLoadState()
+            SpotlightIndexManager.indexState(state)
+        } catch {
+            persistenceBannerError = "Failed to save transcript: \(error.localizedDescription)"
+        }
+    }
+
+    public func deleteHistorySnapshot(id: UUID) {
+        do {
+            state = try store.deleteHistorySnapshot(id: id)
+            SpotlightIndexManager.indexState(state)
+        } catch {
+            persistenceBannerError = "Failed to delete snapshot: \(error.localizedDescription)"
+        }
+    }
+
+    public func exportHistoryJSON() -> String {
+        (try? store.historyStore.exportJSON(snapshots: state.academicHistory))
+            ?? (try? AcademicHistoryStore().exportJSON(snapshots: state.academicHistory))
+            ?? "[]"
+    }
+
+    public func exportHistoryCSV() -> String {
+        store.historyStore.exportCSV(snapshots: state.academicHistory)
+    }
+
+    public func exportHistoryMarkdown() -> String {
+        store.historyStore.exportMarkdownTranscript(snapshots: state.academicHistory)
     }
 
     // MARK: - RenWeb Temporary Email Link Import & Saved Link Sync

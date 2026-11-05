@@ -158,6 +158,7 @@ public struct ImportedCourse: Codable, Equatable, Hashable, Identifiable, Sendab
     public var letterGrade: String?
     public var assignments: [ImportedAssignment]
     public var categories: [CategoryBreakdown]
+    public var weightTier: CourseWeightTier?
 
     public init(
         id: UUID = UUID(),
@@ -168,7 +169,8 @@ public struct ImportedCourse: Codable, Equatable, Hashable, Identifiable, Sendab
         numericAverage: Double? = nil,
         letterGrade: String? = nil,
         assignments: [ImportedAssignment] = [],
-        categories: [CategoryBreakdown] = []
+        categories: [CategoryBreakdown] = [],
+        weightTier: CourseWeightTier? = nil
     ) {
         self.id = id
         self.courseName = courseName
@@ -179,6 +181,11 @@ public struct ImportedCourse: Codable, Equatable, Hashable, Identifiable, Sendab
         self.letterGrade = letterGrade
         self.assignments = assignments
         self.categories = categories
+        self.weightTier = weightTier
+    }
+
+    public var effectiveWeightTier: CourseWeightTier {
+        weightTier ?? CourseWeightTier.inferTier(courseName: courseName, courseCode: courseCode)
     }
 
     public var name: String {
@@ -451,6 +458,154 @@ public struct CalendarEvent: Codable, Equatable, Hashable, Identifiable, Sendabl
     }
 }
 
+// MARK: - Academic Weighting, GPA & Term History Models (FLHS Handbook)
+
+public enum CourseWeightTier: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case regular = "Regular"
+    case honors = "Honors"
+    case advancedHonorsDualCredit = "Advanced Honors / Dual Credit"
+
+    public var id: String { rawValue }
+    public var displayName: String { rawValue }
+
+    public var weightBonus: Double {
+        switch self {
+        case .regular:
+            return 0.0
+        case .honors:
+            return 0.50
+        case .advancedHonorsDualCredit:
+            return 1.00
+        }
+    }
+
+    public static func inferTier(courseName: String, courseCode: String? = nil) -> CourseWeightTier {
+        let name = courseName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let code = courseCode?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let combined = "\(code) \(name)".uppercased()
+
+        // 1. Check Advanced Honors / Dual Credit first (to avoid "AH" matching "H")
+        let ahKeywords = [
+            "ADVANCED HONORS", "ADV. HONORS", "ADV HONORS", "DUAL CREDIT",
+            "SENIOR THESIS AH", "LATIN IV AH", "PHYSICS AH", "ADVANCED STATISTICS AH",
+            "AMERICAN HISTORY AH", "U.S. GOVERNMENT/ECONOMICS AH", "ENGLISH III AH", "ENGLISH IV AH",
+            "ALGEBRA II AH", "GREEK I AH", "GREEK II AH", "GREEK III AH"
+        ]
+        for kw in ahKeywords {
+            if combined.contains(kw) {
+                return .advancedHonorsDualCredit
+            }
+        }
+
+        // Check dual credit college prefixes & course codes from handbook
+        let collegeCourseCodes = [
+            "MATH 122", "MATH 151", "MATH 175", "MATH 184", "MATH 186", "MATH 333",
+            "HHP 100", "ENG 102", "ENG 201", "CTA 211", "MUS 103", "BUS 260",
+            "ECON 2301", "ECON 2302"
+        ]
+        for cCode in collegeCourseCodes {
+            if combined.contains(cCode) {
+                return .advancedHonorsDualCredit
+            }
+        }
+
+        if name.hasSuffix(" AH") || name.hasSuffix("(AH)") || code.hasSuffix(" AH") || code.hasSuffix("(AH)") {
+            return .advancedHonorsDualCredit
+        }
+
+        // 2. Check Honors
+        let honorsKeywords = [
+            "HONORS", "ALGEBRA I H", "GEOMETRY H", "BIOLOGY H", "CHEMISTRY H",
+            "ASTRONOMY H", "ENGLISH I H", "ENGLISH II H", "WORLD HISTORY I H",
+            "WORLD HISTORY II H", "LATIN I H", "LATIN II H", "LATIN III H"
+        ]
+        for kw in honorsKeywords {
+            if combined.contains(kw) {
+                return .honors
+            }
+        }
+
+        if name.hasSuffix(" H") || name.hasSuffix("(H)") || code.hasSuffix(" H") || code.hasSuffix("(H)") {
+            return .honors
+        }
+
+        return .regular
+    }
+}
+
+public enum HonorRollStatus: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case none = "None"
+    case meritRoll = "Merit Roll"
+    case honorRoll = "Honor Roll"
+    case principalsHonorRoll = "Principal's Honor Roll"
+
+    public var id: String { rawValue }
+    public var displayName: String { rawValue }
+
+    public var badgeDescription: String {
+        switch self {
+        case .none:
+            return "No Honors"
+        case .meritRoll:
+            return "Merit Roll (All A/B, GPA ≥ 3.25)"
+        case .honorRoll:
+            return "Honor Roll (All A/B, GPA ≥ 3.75)"
+        case .principalsHonorRoll:
+            return "Principal's Honor Roll (All A's, GPA ≥ 4.00)"
+        }
+    }
+}
+
+public struct GPASummary: Codable, Equatable, Hashable, Sendable {
+    public var unweightedGPA: Double
+    public var weightedGPA: Double
+    public var earnedCredits: Double
+    public var totalCreditsAttempted: Double
+    public var honorRollStatus: HonorRollStatus
+
+    public init(
+        unweightedGPA: Double = 0.0,
+        weightedGPA: Double = 0.0,
+        earnedCredits: Double = 0.0,
+        totalCreditsAttempted: Double = 0.0,
+        honorRollStatus: HonorRollStatus = .none
+    ) {
+        self.unweightedGPA = unweightedGPA
+        self.weightedGPA = weightedGPA
+        self.earnedCredits = earnedCredits
+        self.totalCreditsAttempted = totalCreditsAttempted
+        self.honorRollStatus = honorRollStatus
+    }
+}
+
+public struct TermSnapshot: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public var id: UUID
+    public var schoolYear: String
+    public var termName: String
+    public var syncedAt: Date
+    public var gpaSummary: GPASummary
+    public var courses: [ImportedCourse]
+    public var source: String
+
+    public init(
+        id: UUID = UUID(),
+        schoolYear: String,
+        termName: String,
+        syncedAt: Date = Date(),
+        gpaSummary: GPASummary,
+        courses: [ImportedCourse],
+        source: String = "renweb"
+    ) {
+        self.id = id
+        self.schoolYear = schoolYear
+        self.termName = termName
+        self.syncedAt = syncedAt
+        self.gpaSummary = gpaSummary
+        self.courses = courses
+        self.source = source
+    }
+}
+
 public struct SchoolTrackerState: Codable, Equatable, Sendable {
     public var courses: [ImportedCourse]
     public var tasks: [TrackedTask]
@@ -460,6 +615,7 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
     public var savedLink: SavedRenWebLink?
     public var calendarSubscriptions: [FamilyPortalCalendarSubscription]
     public var calendarEvents: [CalendarEvent]
+    public var academicHistory: [TermSnapshot]
 
     public init(
         courses: [ImportedCourse] = [],
@@ -469,7 +625,8 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
         lastRedactedReportURL: String? = nil,
         savedLink: SavedRenWebLink? = nil,
         calendarSubscriptions: [FamilyPortalCalendarSubscription] = FamilyPortalCalendarSubscription.defaultSubscriptions(),
-        calendarEvents: [CalendarEvent] = []
+        calendarEvents: [CalendarEvent] = [],
+        academicHistory: [TermSnapshot] = []
     ) {
         self.courses = courses
         self.tasks = tasks
@@ -481,6 +638,7 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
             ? FamilyPortalCalendarSubscription.defaultSubscriptions()
             : calendarSubscriptions
         self.calendarEvents = calendarEvents
+        self.academicHistory = academicHistory
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -492,6 +650,7 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
         case savedLink
         case calendarSubscriptions
         case calendarEvents
+        case academicHistory
     }
 
     public init(from decoder: Decoder) throws {
@@ -507,6 +666,7 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
             ? decodedSubs!
             : FamilyPortalCalendarSubscription.defaultSubscriptions()
         self.calendarEvents = try container.decodeIfPresent([CalendarEvent].self, forKey: .calendarEvents) ?? []
+        self.academicHistory = try container.decodeIfPresent([TermSnapshot].self, forKey: .academicHistory) ?? []
     }
 
     public var overallAverage: Double? {

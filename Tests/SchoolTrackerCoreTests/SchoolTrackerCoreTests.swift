@@ -565,6 +565,173 @@ final class SchoolTrackerCoreTests: XCTestCase {
 
         XCTAssertTrue(violations.isEmpty, "Secret audit violations found: \(violations.joined(separator: "; "))")
     }
+
+    // MARK: - 8. FLHS GPA & Weight Tier Tests
+
+    func testFLHSHandbookGPAScaleAndCourseWeightTiers() throws {
+        // FLHS unweighted scale verification
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 98.0), 4.0, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 94.0), 3.8, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 91.5), 3.6, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 88.0), 3.4, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 85.0), 3.2, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 81.0), 3.0, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 78.5), 2.8, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 75.0), 2.6, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 72.0), 2.4, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 70.5), 2.0, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 69.9), 0.0, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.unweightedPoints(for: 50.0), 0.0, accuracy: 0.001)
+
+        // Weight bonuses
+        XCTAssertEqual(CourseWeightTier.regular.weightBonus, 0.0, accuracy: 0.001)
+        XCTAssertEqual(CourseWeightTier.honors.weightBonus, 0.50, accuracy: 0.001)
+        XCTAssertEqual(CourseWeightTier.advancedHonorsDualCredit.weightBonus, 1.00, accuracy: 0.001)
+
+        // Weighted points calculation: score 95.0 (base 3.8)
+        XCTAssertEqual(GPACalculator.weightedPoints(for: 95.0, tier: .regular), 3.8, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.weightedPoints(for: 95.0, tier: .honors), 4.3, accuracy: 0.001)
+        XCTAssertEqual(GPACalculator.weightedPoints(for: 95.0, tier: .advancedHonorsDualCredit), 4.8, accuracy: 0.001)
+
+        // Failing scores (< 70) yield 0.0 weighted points regardless of tier
+        XCTAssertEqual(GPACalculator.weightedPoints(for: 68.0, tier: .advancedHonorsDualCredit), 0.0, accuracy: 0.001)
+
+        // Letter grade inference
+        XCTAssertEqual(GPACalculator.letterGrade(for: 92.0), "A")
+        XCTAssertEqual(GPACalculator.letterGrade(for: 84.0), "B")
+        XCTAssertEqual(GPACalculator.letterGrade(for: 75.0), "C")
+        XCTAssertEqual(GPACalculator.letterGrade(for: 70.5), "D")
+        XCTAssertEqual(GPACalculator.letterGrade(for: 65.0), "F")
+
+        // Overall GPA calculation for mixed courses
+        let sampleCourses = [
+            ImportedCourse(courseName: "Theology 11", numericAverage: 95.0, weightTier: .regular),
+            ImportedCourse(courseName: "Honors Chemistry", numericAverage: 88.0, weightTier: .honors),
+            ImportedCourse(courseName: "AP Calculus BC", numericAverage: 92.0, weightTier: .advancedHonorsDualCredit)
+        ]
+        let summary = GPACalculator.calculateGPA(for: sampleCourses)
+        XCTAssertEqual(summary.unweightedGPA, 3.60, accuracy: 0.01)
+        XCTAssertEqual(summary.weightedGPA, 4.10, accuracy: 0.01)
+        XCTAssertEqual(summary.earnedCredits, 1.50, accuracy: 0.01)
+        XCTAssertEqual(summary.totalCreditsAttempted, 1.50, accuracy: 0.01)
+    }
+
+    func testFLHSHonorRollQualificationsAndDisqualifications() throws {
+        // Principal's Honor Roll: all courses >= 90 AND weighted GPA >= 4.00
+        let principalsCourses = [
+            ImportedCourse(courseName: "Calculus I", numericAverage: 95.0, weightTier: .advancedHonorsDualCredit),
+            ImportedCourse(courseName: "Physics AH", numericAverage: 92.0, weightTier: .advancedHonorsDualCredit),
+            ImportedCourse(courseName: "English III AH", numericAverage: 94.0, weightTier: .advancedHonorsDualCredit)
+        ]
+        let pSummary = GPACalculator.calculateGPA(for: principalsCourses)
+        XCTAssertEqual(pSummary.honorRollStatus, .principalsHonorRoll)
+
+        // Honor Roll: all courses >= 80 AND weighted GPA >= 3.75
+        let honorCourses = [
+            ImportedCourse(courseName: "Theology 11", numericAverage: 94.0, weightTier: .regular),
+            ImportedCourse(courseName: "Chemistry H", numericAverage: 88.0, weightTier: .honors),
+            ImportedCourse(courseName: "Latin III H", numericAverage: 86.0, weightTier: .honors)
+        ]
+        let hSummary = GPACalculator.calculateGPA(for: honorCourses)
+        XCTAssertEqual(hSummary.honorRollStatus, .honorRoll)
+
+        // Merit Roll: all courses >= 80 AND weighted GPA >= 3.25
+        let meritCourses = [
+            ImportedCourse(courseName: "Theology 11", numericAverage: 84.0, weightTier: .regular),
+            ImportedCourse(courseName: "World History", numericAverage: 85.0, weightTier: .regular),
+            ImportedCourse(courseName: "Art I", numericAverage: 88.0, weightTier: .regular)
+        ]
+        let mSummary = GPACalculator.calculateGPA(for: meritCourses)
+        XCTAssertEqual(mSummary.honorRollStatus, .meritRoll)
+
+        // Disqualification: failing grade (< 70) disqualifies despite high weighted GPA
+        let disqualifiedCourses = [
+            ImportedCourse(courseName: "Calculus I", numericAverage: 99.0, weightTier: .advancedHonorsDualCredit),
+            ImportedCourse(courseName: "Physics AH", numericAverage: 99.0, weightTier: .advancedHonorsDualCredit),
+            ImportedCourse(courseName: "Physical Education", numericAverage: 68.0, weightTier: .regular)
+        ]
+        let dSummary = GPACalculator.calculateGPA(for: disqualifiedCourses)
+        XCTAssertEqual(dSummary.honorRollStatus, .none)
+    }
+
+    func testAcademicHistoryStoreMultiQuarterPersistenceAndExports() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let storeFile = tempDir.appendingPathComponent("history.json")
+        let store = AcademicHistoryStore(historyFileURL: storeFile)
+
+        let q1Courses = [
+            ImportedCourse(courseName: "Christian Doctrine III", courseCode: "THEO 11", numericAverage: 94.0, weightTier: .regular),
+            ImportedCourse(courseName: "Calculus I", courseCode: "MATH 184", numericAverage: 95.0, weightTier: .advancedHonorsDualCredit)
+        ]
+        let q2Courses = [
+            ImportedCourse(courseName: "Christian Doctrine III", courseCode: "THEO 11", numericAverage: 96.0, weightTier: .regular),
+            ImportedCourse(courseName: "Calculus I", courseCode: "MATH 184", numericAverage: 91.0, weightTier: .advancedHonorsDualCredit)
+        ]
+
+        // Record Q1 and Q2
+        try store.recordSnapshot(courses: q1Courses, schoolYear: "2026-2027", termName: "Q1", source: "test")
+        try store.recordSnapshot(courses: q2Courses, schoolYear: "2026-2027", termName: "Q2", source: "test")
+
+        // Load and verify
+        let snapshots = try store.loadHistory()
+        XCTAssertEqual(snapshots.count, 2)
+        XCTAssertEqual(snapshots[0].termName, "Q1")
+        XCTAssertEqual(snapshots[1].termName, "Q2")
+
+        // Verify POSIX permissions 0600
+        let attrs = try FileManager.default.attributesOfItem(atPath: storeFile.path)
+        if let perms = attrs[.posixPermissions] as? NSNumber {
+            XCTAssertEqual(perms.intValue, 0o600)
+        }
+
+        // Export JSON
+        let json = try store.exportJSON()
+        XCTAssertTrue(json.contains("2026-2027"))
+        XCTAssertTrue(json.contains("Q1"))
+        XCTAssertTrue(json.contains("Q2"))
+        XCTAssertTrue(json.contains("Christian Doctrine III"))
+
+        // Export CSV
+        let csv = store.exportCSV()
+        XCTAssertTrue(csv.contains("School Year,Term,Course Name,Course Code,Teacher,Numeric Grade,Letter Grade,Weight Tier,Unweighted Points,Weighted Points,Credits Earned,Source"))
+        XCTAssertTrue(csv.contains("2026-2027,Q1,Christian Doctrine III,THEO 11"))
+        XCTAssertTrue(csv.contains("2026-2027,Q2,Calculus I,MATH 184"))
+
+        // Export Markdown
+        let md = store.exportMarkdownTranscript()
+        XCTAssertTrue(md.contains("# Official Academic Record & Historical Transcripts"))
+        XCTAssertTrue(md.contains("## 2026-2027 — Q1"))
+        XCTAssertTrue(md.contains("## 2026-2027 — Q2"))
+        XCTAssertTrue(md.contains("| Christian Doctrine III | THEO 11 | 94.0% |"))
+    }
+
+    func testLocalTranscriptTextParsingAndTierInference() throws {
+        let (snapshot, courses) = try LocalTranscriptParser.parseTranscriptText(
+            AnonymizedReportFixtures.anonymizedFLHSTranscriptText
+        )
+
+        XCTAssertEqual(courses.count, 8)
+        XCTAssertEqual(snapshot.schoolYear, "2026-2027")
+        XCTAssertEqual(snapshot.termName, "Semester 1")
+
+        let eng = courses.first(where: { $0.courseCode == "ENG 102" })
+        XCTAssertEqual(eng?.weightTier, .advancedHonorsDualCredit)
+
+        let chem = courses.first(where: { $0.courseCode == "CHEM H" })
+        XCTAssertEqual(chem?.weightTier, .honors)
+
+        let theo = courses.first(where: { $0.courseCode == "THEO 11" })
+        XCTAssertEqual(theo?.weightTier, .regular)
+
+        XCTAssertEqual(snapshot.gpaSummary.earnedCredits, 4.0, accuracy: 0.01)
+        XCTAssertEqual(snapshot.gpaSummary.totalCreditsAttempted, 4.0, accuracy: 0.01)
+        XCTAssertEqual(snapshot.gpaSummary.weightedGPA, 4.30, accuracy: 0.05)
+        XCTAssertEqual(snapshot.gpaSummary.unweightedGPA, 3.68, accuracy: 0.05)
+        XCTAssertEqual(snapshot.gpaSummary.honorRollStatus, .honorRoll)
+    }
 }
 
 #if STANDALONE_TEST_RUNNER && !canImport(XCTest)
@@ -590,7 +757,11 @@ struct StandaloneTestRunner {
             ("testFamilyPortalCalendarLinkParserNormalizesWebcalAndRedactsTokens", suite.testFamilyPortalCalendarLinkParserNormalizesWebcalAndRedactsTokens),
             ("testFamilyPortalICalendarParserExtractsEventsPerCategory", suite.testFamilyPortalICalendarParserExtractsEventsPerCategory),
             ("testFamilyPortalCalendarSubscriptionsRequireAtLeastOneAndIsolateCategorySpaces", suite.testFamilyPortalCalendarSubscriptionsRequireAtLeastOneAndIsolateCategorySpaces),
-            ("testRepositoryWorkingTreeContainsNoLiveTokens", suite.testRepositoryWorkingTreeContainsNoLiveTokens)
+            ("testRepositoryWorkingTreeContainsNoLiveTokens", suite.testRepositoryWorkingTreeContainsNoLiveTokens),
+            ("testFLHSHandbookGPAScaleAndCourseWeightTiers", suite.testFLHSHandbookGPAScaleAndCourseWeightTiers),
+            ("testFLHSHonorRollQualificationsAndDisqualifications", suite.testFLHSHonorRollQualificationsAndDisqualifications),
+            ("testAcademicHistoryStoreMultiQuarterPersistenceAndExports", suite.testAcademicHistoryStoreMultiQuarterPersistenceAndExports),
+            ("testLocalTranscriptTextParsingAndTierInference", suite.testLocalTranscriptTextParsingAndTierInference)
         ]
         let asyncTests: [(String, () async throws -> Void)] = [
             ("testConcurrentLinkValidationAndReportParsing", suite.testConcurrentLinkValidationAndReportParsing),

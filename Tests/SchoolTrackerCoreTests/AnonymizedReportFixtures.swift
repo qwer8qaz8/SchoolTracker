@@ -220,4 +220,27 @@ public enum AnonymizedReportFixtures {
         }
         return "<!DOCTYPE html><html><body>\(sections.joined(separator: "\n"))</body></html>"
     }
+
+    /// Synthetic FLHS transcript and report card text for local OCR / document extraction tests (zero PII).
+    public static let anonymizedFLHSTranscriptText = """
+    FAITH LUTHERAN HIGH SCHOOL
+    Official Academic Transcript
+    Student: Student, Test | ID: 999999 | Grade: 11
+    School Year: 2026-2027 | Term: Semester 1
+
+    Course Code  Course Name                      Grade  Credits  Weight Tier
+    THEO 11      Christian Doctrine III          94.0   0.50     Regular
+    ENG 102      Experience in Writing           91.0   0.50     Adv. Honors / Dual Credit
+    MATH 184     Calculus I                      95.0   0.50     Adv. Honors / Dual Credit
+    CHEM H       Chemistry H                     88.0   0.50     Honors
+    HIST 11      American History AH             92.0   0.50     Adv. Honors / Dual Credit
+    LATIN III H  Latin III H                     86.0   0.50     Honors
+    RHET 11      Rhetoric                        98.0   0.50     Regular
+    HHP 100      Lifetime Wellness               99.0   0.50     Adv. Honors / Dual Credit
+
+    Total Credits Earned: 4.00
+    Semester Unweighted GPA: 3.65
+    Semester Weighted GPA: 4.45
+    Honor Roll: Principal's Honor Roll
+    """
 }

@@ -30,6 +30,13 @@ struct RootSplitView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button {
+                        viewModel.openTranscriptImportSheet()
+                    } label: {
+                        Label("Import Transcript", systemImage: "doc.text.viewfinder")
+                    }
+                    .help("Import a PDF report card or scanned transcript via on-device Apple Intelligence OCR")
+
+                    Button {
                         viewModel.openCalendarSubscriptionSheet()
                     } label: {
                         Label("Calendars", systemImage: "calendar.badge.plus")
@@ -84,6 +91,9 @@ struct RootSplitView: View {
         .sheet(isPresented: $viewModel.isPresentingNewCalendarEventSheet) {
             NewCalendarEventSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.isPresentingTranscriptImportSheet) {
+            TranscriptImportSheet(viewModel: viewModel)
+        }
     }
 
     @ViewBuilder
@@ -110,6 +120,10 @@ struct RootSplitView: View {
                 switch viewModel.selectedSection ?? .overview {
                 case .overview:
                     GradeSummaryView(viewModel: viewModel)
+                case .gpa:
+                    GPADashboardView(viewModel: viewModel)
+                case .history:
+                    AcademicHistoryView(viewModel: viewModel)
                 case .tasks:
                     TaskTrackerView(viewModel: viewModel)
                 case .calendar(let category):
@@ -135,9 +149,39 @@ private struct SidebarView: View {
 
     var body: some View {
         List(selection: $viewModel.selectedSection) {
-            Section("Dashboard") {
+            Section("Academic Standing") {
                 NavigationLink(value: SidebarSection.overview) {
                     Label("Grade Summary", systemImage: "chart.bar.doc.horizontal")
+                }
+
+                NavigationLink(value: SidebarSection.gpa) {
+                    HStack {
+                        Label("FLHS GPA & Credits", systemImage: "graduationcap.fill")
+                        Spacer()
+                        Text(String(format: "%.2f", viewModel.gpaSummary.weightedGPA))
+                            .font(.caption2.weight(.bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.15))
+                            .foregroundStyle(Color.accentColor)
+                            .clipShape(Capsule())
+                    }
+                }
+
+                NavigationLink(value: SidebarSection.history) {
+                    HStack {
+                        Label("Academic History", systemImage: "clock.arrow.circlepath")
+                        Spacer()
+                        if !viewModel.state.academicHistory.isEmpty {
+                            Text("\(viewModel.state.academicHistory.count)")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.secondary.opacity(0.15))
+                                .foregroundStyle(.secondary)
+                                .clipShape(Capsule())
+                        }
+                    }
                 }
 
                 NavigationLink(value: SidebarSection.tasks) {

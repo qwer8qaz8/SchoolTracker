@@ -18,6 +18,10 @@ struct GradeSummaryView: View {
 
                 savedLinkStatusCard
 
+                if !viewModel.state.courses.isEmpty {
+                    gpaHighlightCard
+                }
+
                 LazyVGrid(columns: metricColumns, spacing: 14) {
                     SummaryMetricCard(
                         title: "Overall Average",
@@ -170,6 +174,45 @@ struct GradeSummaryView: View {
             }
             .padding(14)
             .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private var gpaHighlightCard: some View {
+        let summary = viewModel.gpaSummary
+        return LiquidGlassCard {
+            HStack(alignment: .center, spacing: 16) {
+                Image(systemName: "graduationcap.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Color.accentColor)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text("FLHS Weighted GPA: \(String(format: "%.2f", summary.weightedGPA))")
+                            .font(.headline)
+                        Text("(Unweighted \(String(format: "%.2f", summary.unweightedGPA)))")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        if summary.honorRollStatus != .none {
+                            LiquidGlassBadge(summary.honorRollStatus.rawValue, systemImage: "medal.fill", tint: .orange)
+                        }
+                    }
+
+                    Text("Credits: \(String(format: "%.1f", summary.earnedCredits)) / \(String(format: "%.0f", GPACalculator.graduationCreditsRequired)) graduation credits earned")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button {
+                    viewModel.selectedSection = .gpa
+                } label: {
+                    Text("View GPA & Weights…")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 

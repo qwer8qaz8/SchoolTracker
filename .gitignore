@@ -24,6 +24,12 @@ DerivedData/
 state.json
 saved-link.json
 saved-calendars.json
+history.json
+*.transcript.md
+*.transcript.csv
+*transcript*.json
+exports/
+*Export*
 *.sqlite
 *.sqlite3
 *.db

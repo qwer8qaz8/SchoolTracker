@@ -42,6 +42,7 @@ public final class SchoolTrackerStore: @unchecked Sendable {
     public let stateFileURL: URL
     public let savedLinkCredentialFileURL: URL
     public let savedCalendarsCredentialFileURL: URL
+    public let historyStore: AcademicHistoryStore
     private let lock = NSRecursiveLock()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -49,7 +50,8 @@ public final class SchoolTrackerStore: @unchecked Sendable {
     public init(
         stateFileURL: URL = SchoolTrackerStore.defaultStateFileURL(),
         savedLinkCredentialFileURL: URL? = nil,
-        savedCalendarsCredentialFileURL: URL? = nil
+        savedCalendarsCredentialFileURL: URL? = nil,
+        historyStore: AcademicHistoryStore? = nil
     ) {
         self.stateFileURL = stateFileURL
         let baseDir = stateFileURL.deletingLastPathComponent()
@@ -57,6 +59,8 @@ public final class SchoolTrackerStore: @unchecked Sendable {
             ?? baseDir.appendingPathComponent("saved-link.json", isDirectory: false)
         self.savedCalendarsCredentialFileURL = savedCalendarsCredentialFileURL
             ?? baseDir.appendingPathComponent("saved-calendars.json", isDirectory: false)
+        self.historyStore = historyStore
+            ?? AcademicHistoryStore(historyFileURL: baseDir.appendingPathComponent("history.json", isDirectory: false))
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -324,6 +328,110 @@ public final class SchoolTrackerStore: @unchecked Sendable {
             )
         }
 
+        // Automatic term snapshot into persistent multi-quarter history
+        let termName = report.term ?? state.courses.compactMap(\.term).first ?? "Current Term"
+        let schoolYear = report.schoolYear ?? "2026-2027"
+        let snapshot = TermSnapshot(
+            schoolYear: schoolYear,
+            termName: termName,
+            syncedAt: syncedAt,
+            gpaSummary: GPACalculator.calculateGPA(for: state.courses),
+            courses: state.courses,
+            source: link != nil ? "renweb" : "imported-report"
+        )
+        if let idx = state.academicHistory.firstIndex(where: {
+            $0.schoolYear.caseInsensitiveCompare(snapshot.schoolYear) == .orderedSame
+                && $0.termName.caseInsensitiveCompare(snapshot.termName) == .orderedSame
+        }) {
+            var updated = snapshot
+            updated.id = state.academicHistory[idx].id
+            state.academicHistory[idx] = updated
+        } else {
+            state.academicHistory.append(snapshot)
+        }
+        _ = try? historyStore.recordSnapshot(
+            courses: state.courses,
+            schoolYear: schoolYear,
+            termName: termName,
+            source: snapshot.source,
+            syncedAt: syncedAt
+        )
+
+        try saveState(state)
+        return state
+    }
+
+    // MARK: - Academic History & Term Snapshot Management
+
+    @discardableResult
+    public func snapshotCurrentTerm(
+        termName: String? = nil,
+        schoolYear: String? = nil,
+        source: String = "manual",
+        syncedAt: Date = Date()
+    ) throws -> TermSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var state = try loadState()
+        let resolvedTerm = termName ?? state.courses.compactMap(\.term).first ?? "Current Term"
+        let resolvedYear = schoolYear ?? "2026-2027"
+        let snapshot = try historyStore.recordSnapshot(
+            courses: state.courses,
+            schoolYear: resolvedYear,
+            termName: resolvedTerm,
+            source: source,
+            syncedAt: syncedAt
+        )
+        if let idx = state.academicHistory.firstIndex(where: { $0.id == snapshot.id }) {
+            state.academicHistory[idx] = snapshot
+        } else {
+            state.academicHistory.append(snapshot)
+        }
+        try saveState(state)
+        return snapshot
+    }
+
+    @discardableResult
+    public func applyTranscriptSnapshot(
+        _ snapshot: TermSnapshot,
+        mergeIntoCurrentCourses: Bool = true
+    ) throws -> SchoolTrackerState {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var state = try loadState()
+        if mergeIntoCurrentCourses {
+            state.courses = Self.mergeCourses(existing: state.courses, imported: snapshot.courses)
+            state.lastSyncedAt = snapshot.syncedAt
+        }
+        if let idx = state.academicHistory.firstIndex(where: {
+            $0.schoolYear.caseInsensitiveCompare(snapshot.schoolYear) == .orderedSame
+                && $0.termName.caseInsensitiveCompare(snapshot.termName) == .orderedSame
+        }) {
+            state.academicHistory[idx] = snapshot
+        } else {
+            state.academicHistory.append(snapshot)
+        }
+        _ = try? historyStore.recordSnapshot(
+            courses: snapshot.courses,
+            schoolYear: snapshot.schoolYear,
+            termName: snapshot.termName,
+            source: snapshot.source,
+            syncedAt: snapshot.syncedAt
+        )
+        try saveState(state)
+        return state
+    }
+
+    @discardableResult
+    public func deleteHistorySnapshot(id: UUID) throws -> SchoolTrackerState {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var state = try loadState()
+        state.academicHistory.removeAll { $0.id == id }
+        _ = try? historyStore.deleteSnapshot(id: id)
         try saveState(state)
         return state
     }
