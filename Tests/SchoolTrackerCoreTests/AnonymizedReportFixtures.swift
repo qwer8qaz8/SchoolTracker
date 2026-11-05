@@ -134,6 +134,61 @@ public enum AnonymizedReportFixtures {
     </html>
     """
 
+    /// Synthetic RFC 5545 iCalendar (.ics) feeds for School, My Classrooms, and My Homework spaces (zero PII).
+    public static let validWebcalFeedURL =
+        "webcal://test-xx.client.factsmgt.com/renweb/calendar/feed.ics?District=TEST-XX&token=00000000-0000-0000-0000-000000000000"
+
+    public static let schoolCalendarICS = """
+    BEGIN:VCALENDAR
+    VERSION:2.0
+    PRODID:-//FACTS Family Portal//School Calendar//EN
+    BEGIN:VEVENT
+    UID:school-evt-001@test-xx.factsmgt.com
+    DTSTART;VALUE=DATE:20261123
+    DTEND;VALUE=DATE:20261128
+    SUMMARY:Thanksgiving Break - Campus Closed
+    LOCATION:All Campuses
+    DESCRIPTION:No classes in session for Thanksgiving Break.
+    END:VEVENT
+    BEGIN:VEVENT
+    UID:school-evt-002@test-xx.factsmgt.com
+    DTSTART:20261110T003000Z
+    DTEND:20261110T020000Z
+    SUMMARY:Fall Academic Showcase &
+      Family Night
+    LOCATION:Main Auditorium\\, Building A
+    END:VEVENT
+    END:VCALENDAR
+    """
+
+    public static let classroomsCalendarICS = """
+    BEGIN:VCALENDAR
+    VERSION:2.0
+    PRODID:-//FACTS Family Portal//My Classrooms//EN
+    BEGIN:VEVENT
+    UID:classroom-evt-001@test-xx.factsmgt.com
+    DTSTART:20261112T150000Z
+    DTEND:20261112T160000Z
+    SUMMARY:AP Calculus BC - Taylor Series Seminar
+    LOCATION:Room 204
+    DESCRIPTION:Bring graphing calculator and practice packet.
+    END:VEVENT
+    END:VCALENDAR
+    """
+
+    public static let homeworkCalendarICS = """
+    BEGIN:VCALENDAR
+    VERSION:2.0
+    PRODID:-//FACTS Family Portal//My Homework//EN
+    BEGIN:VEVENT
+    UID:homework-evt-001@test-xx.factsmgt.com
+    DTSTART;VALUE=DATE:20261115
+    SUMMARY:Honors Chemistry - Titration Lab Post-Lab Questions
+    DESCRIPTION:Submit via Family Portal before 8:00 AM.
+    END:VEVENT
+    END:VCALENDAR
+    """
+
     /// Generates a huge report with `courseCount` courses and `assignmentsPerCourse` rows to probe parser scaling.
     public static func makeLargeReportHTML(courseCount: Int, assignmentsPerCourse: Int) -> String {
         var sections = [String]()

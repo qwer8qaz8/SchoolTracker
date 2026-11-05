@@ -7,7 +7,7 @@ struct RootSplitView: View {
     var body: some View {
         NavigationSplitView {
             SidebarView(viewModel: viewModel)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 255, max: 330)
+                .navigationSplitViewColumnWidth(min: 225, ideal: 260, max: 340)
         } detail: {
             VStack(spacing: 0) {
                 if let bannerError = viewModel.persistenceBannerError {
@@ -29,6 +29,13 @@ struct RootSplitView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        viewModel.openCalendarSubscriptionSheet()
+                    } label: {
+                        Label("Calendars", systemImage: "calendar.badge.plus")
+                    }
+                    .help("Subscribe to Family Portal Calendars (School, My Classrooms, My Homework)")
+
                     Button {
                         viewModel.isPresentingNewTaskSheet = true
                     } label: {
@@ -71,39 +78,52 @@ struct RootSplitView: View {
         .sheet(isPresented: $viewModel.isPresentingNewTaskSheet) {
             NewTaskSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.isPresentingCalendarSubscriptionSheet) {
+            CalendarSubscriptionSheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: $viewModel.isPresentingNewCalendarEventSheet) {
+            NewCalendarEventSheet(viewModel: viewModel)
+        }
     }
 
     @ViewBuilder
     private var detailContent: some View {
-        switch viewModel.loadState {
-        case .loading:
-            AppLoadingStateView()
-        case .error(let message):
-            AppErrorStateView(
-                message: message,
-                onRetry: { viewModel.loadInitialState() },
-                onImport: { viewModel.openImportSheet() }
-            )
-        case .empty:
-            AppEmptyStateView(
-                onImportRenWeb: { viewModel.openImportSheet() },
-                onCreateTask: { viewModel.isPresentingNewTaskSheet = true }
-            )
-        case .loaded:
-            switch viewModel.selectedSection ?? .overview {
-            case .overview:
-                GradeSummaryView(viewModel: viewModel)
-            case .tasks:
-                TaskTrackerView(viewModel: viewModel)
-            case .course(let courseID):
-                if let course = viewModel.course(for: courseID) {
-                    CourseDetailView(course: course, viewModel: viewModel)
-                } else {
-                    ContentUnavailableView(
-                        "Course Not Found",
-                        systemImage: "book.closed",
-                        description: Text("This course is no longer in the current report.")
-                    )
+        if case .calendar(let category) = viewModel.selectedSection {
+            CalendarCategorySpaceView(category: category, viewModel: viewModel)
+        } else {
+            switch viewModel.loadState {
+            case .loading:
+                AppLoadingStateView()
+            case .error(let message):
+                AppErrorStateView(
+                    message: message,
+                    onRetry: { viewModel.loadInitialState() },
+                    onImport: { viewModel.openImportSheet() }
+                )
+            case .empty:
+                AppEmptyStateView(
+                    onImportRenWeb: { viewModel.openImportSheet() },
+                    onSubscribeCalendars: { viewModel.openCalendarSubscriptionSheet() },
+                    onCreateTask: { viewModel.isPresentingNewTaskSheet = true }
+                )
+            case .loaded:
+                switch viewModel.selectedSection ?? .overview {
+                case .overview:
+                    GradeSummaryView(viewModel: viewModel)
+                case .tasks:
+                    TaskTrackerView(viewModel: viewModel)
+                case .calendar(let category):
+                    CalendarCategorySpaceView(category: category, viewModel: viewModel)
+                case .course(let courseID):
+                    if let course = viewModel.course(for: courseID) {
+                        CourseDetailView(course: course, viewModel: viewModel)
+                    } else {
+                        ContentUnavailableView(
+                            "Course Not Found",
+                            systemImage: "book.closed",
+                            description: Text("This course is no longer in the current report.")
+                        )
+                    }
                 }
             }
         }
@@ -135,6 +155,26 @@ private struct SidebarView: View {
                         }
                     }
                 }
+            }
+
+            Section("Family Portal Calendars") {
+                ForEach(viewModel.subscribedCalendarCategories) { category in
+                    NavigationLink(value: SidebarSection.calendar(category)) {
+                        SidebarCalendarCategoryRow(
+                            category: category,
+                            eventCount: viewModel.state.events(for: category).count
+                        )
+                    }
+                }
+
+                Button {
+                    viewModel.openCalendarSubscriptionSheet()
+                } label: {
+                    Label("Subscribe to Calendars…", systemImage: "calendar.badge.plus")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.borderless)
+                .padding(.top, 2)
             }
 
             Section("Courses (\(viewModel.state.courses.count))") {
@@ -217,6 +257,30 @@ private struct SidebarView: View {
     }
 }
 
+private struct SidebarCalendarCategoryRow: View {
+    let category: FamilyPortalCalendarCategory
+    let eventCount: Int
+
+    var body: some View {
+        let tint = SchoolTrackerViewModel.calendarCategoryTint(for: category)
+        HStack(spacing: 8) {
+            Image(systemName: category.systemImage)
+                .foregroundStyle(tint)
+            Text(category.displayName)
+                .lineLimit(1)
+            Spacer()
+            if eventCount > 0 {
+                Text("\(eventCount)")
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(tint.opacity(0.15), in: Capsule())
+                    .foregroundStyle(tint)
+            }
+        }
+    }
+}
+
 private struct SidebarCourseRow: View {
     let course: ImportedCourse
 
@@ -255,7 +319,7 @@ private struct AppLoadingStateView: View {
                 .controlSize(.large)
             Text("Loading local school tracker state…")
                 .font(.headline)
-            Text("Reading courses, tasks, and saved link metadata from Application Support.")
+            Text("Reading courses, tasks, calendar spaces, and saved link metadata from Application Support.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -296,6 +360,7 @@ private struct AppErrorStateView: View {
 
 private struct AppEmptyStateView: View {
     let onImportRenWeb: () -> Void
+    let onSubscribeCalendars: () -> Void
     let onCreateTask: () -> Void
 
     var body: some View {
@@ -307,11 +372,11 @@ private struct AppEmptyStateView: View {
             VStack(spacing: 6) {
                 Text("No Courses or Tasks Yet")
                     .font(.title2.weight(.semibold))
-                Text("Paste a temporary FACTS/RenWeb GetReport.cfm email link to save it in the app, track when it expires, and pull your current grades.")
+                Text("Paste a temporary FACTS/RenWeb GetReport.cfm email link to save it in the app, track when it expires, and pull your current grades, or configure your Family Portal Calendar spaces.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 480)
+                    .frame(maxWidth: 500)
             }
 
             HStack(spacing: 12) {
@@ -319,6 +384,12 @@ private struct AppEmptyStateView: View {
                     Label("Save & Import RenWeb Link", systemImage: "link.badge.plus")
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Button(action: onSubscribeCalendars) {
+                    Label("Subscribe to Calendars", systemImage: "calendar.badge.plus")
+                }
+                .buttonStyle(.bordered)
                 .controlSize(.large)
 
                 Button(action: onCreateTask) {

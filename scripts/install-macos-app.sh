@@ -33,6 +33,9 @@ cp "$BIN_PATH" "$MACOS_DIR/$EXECUTABLE_NAME"
 chmod 755 "$MACOS_DIR/$EXECUTABLE_NAME"
 printf 'APPL????' > "$CONTENTS_DIR/PkgInfo"
 
+echo "==> Generating macOS AppIcon.icns..."
+swift "$REPO_ROOT/scripts/generate-app-icon.swift" "$RESOURCES_DIR/AppIcon.icns"
+
 cat <<EOF > "$CONTENTS_DIR/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,6 +47,8 @@ cat <<EOF > "$CONTENTS_DIR/Info.plist"
     <string>${APP_NAME}</string>
     <key>CFBundleExecutable</key>
     <string>${EXECUTABLE_NAME}</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
     <key>CFBundleInfoDictionaryVersion</key>

@@ -21,6 +21,10 @@ public enum TelemetryMetric: String, CaseIterable, Sendable {
     case savedLinkLoadFailure = "persistence.saved_link.load.failure"
     case savedLinkMarkedExpired = "persistence.saved_link.marked_expired"
     case savedLinkCleared = "persistence.saved_link.cleared"
+    case calendarSubscriptionUpdateSuccess = "calendar.subscription.update.success"
+    case calendarSubscriptionUpdateFailure = "calendar.subscription.update.failure"
+    case calendarFeedParseSuccess = "calendar.feed.parse.success"
+    case calendarFeedParseFailure = "calendar.feed.parse.failure"
 }
 
 public final class SchoolTrackerTelemetry: @unchecked Sendable {
@@ -64,11 +68,11 @@ public final class SchoolTrackerTelemetry: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Scrubs any SessionID=<token> query parameter before emitting log messages.
+    /// Scrubs any SessionID=<token> or calendar feed secret query parameter before emitting log messages or saving state.
     public static func redactSensitiveTokens(in text: String) -> String {
         guard !text.isEmpty else { return text }
         guard let regex = try? NSRegularExpression(
-            pattern: #"(SessionID=)[^&\s\"']+"#,
+            pattern: #"((?:SessionID|token|key|auth|secret|sig)=)[^&\s\"']+"#,
             options: [.caseInsensitive]
         ) else {
             return text

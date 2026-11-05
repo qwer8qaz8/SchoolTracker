@@ -50,6 +50,8 @@ struct GradeSummaryView: View {
                 }
 
                 coursesSection
+
+                calendarSpacesSection
             }
             .padding(24)
         }
@@ -216,6 +218,56 @@ struct GradeSummaryView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                }
+            }
+        }
+    }
+
+    private var calendarSpacesSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Family Portal Calendar Spaces")
+                    .font(.headline)
+                Spacer()
+                Button("Subscribe to Calendars…") {
+                    viewModel.openCalendarSubscriptionSheet()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                ForEach(viewModel.subscribedCalendarCategories) { category in
+                    let tint = SchoolTrackerViewModel.calendarCategoryTint(for: category)
+                    let count = viewModel.state.events(for: category).count
+                    Button {
+                        viewModel.selectedSection = .calendar(category)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: category.systemImage)
+                                .font(.title3)
+                                .foregroundStyle(tint)
+                                .frame(width: 28)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(category.displayName)
+                                    .font(.subheadline.weight(.semibold))
+                                Text("\(count) event\(count == 1 ? "" : "s") in space")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(14)
+                        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .strokeBorder(tint.opacity(0.28), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }

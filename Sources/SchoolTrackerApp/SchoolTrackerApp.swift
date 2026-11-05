@@ -8,18 +8,24 @@ struct SchoolTrackerApp: App {
     var body: some Scene {
         WindowGroup("SchoolTracker") {
             RootSplitView(viewModel: viewModel)
-                .frame(minWidth: 900, minHeight: 600)
+                .frame(minWidth: 920, minHeight: 620)
                 .onAppear {
+                    SchoolTrackerAppIcon.applyRuntimeDockIconIfNeeded()
                     viewModel.loadInitialState()
                 }
         }
-        .defaultSize(width: 1120, height: 740)
+        .defaultSize(width: 1140, height: 760)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Import or Manage RenWeb Link…") {
                     viewModel.openImportSheet()
                 }
                 .keyboardShortcut("i", modifiers: [.command])
+
+                Button("Subscribe to Family Portal Calendars…") {
+                    viewModel.openCalendarSubscriptionSheet()
+                }
+                .keyboardShortcut("k", modifiers: [.command])
 
                 Button("Sync Saved RenWeb Link") {
                     if viewModel.hasSavedLink {

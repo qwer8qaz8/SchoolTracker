@@ -5,6 +5,7 @@ import SchoolTrackerCore
 public enum SidebarSection: Hashable, Identifiable {
     case overview
     case tasks
+    case calendar(FamilyPortalCalendarCategory)
     case course(UUID)
 
     public var id: String {
@@ -13,6 +14,8 @@ public enum SidebarSection: Hashable, Identifiable {
             return "overview"
         case .tasks:
             return "tasks"
+        case .calendar(let category):
+            return "calendar-\(category.rawValue)"
         case .course(let uuid):
             return "course-\(uuid.uuidString)"
         }
@@ -23,6 +26,21 @@ public enum TaskFilter: String, CaseIterable, Identifiable {
     case pending = "Pending"
     case completed = "Completed"
     case all = "All"
+
+    public var id: String { rawValue }
+}
+
+public enum CalendarTimeFilter: String, CaseIterable, Identifiable {
+    case upcoming = "Upcoming"
+    case all = "All Events"
+    case past = "Past"
+
+    public var id: String { rawValue }
+}
+
+public enum CalendarDisplayMode: String, CaseIterable, Identifiable {
+    case split = "Month & Agenda"
+    case agenda = "Agenda List"
 
     public var id: String { rawValue }
 }
@@ -61,6 +79,8 @@ public final class SchoolTrackerViewModel: ObservableObject {
 
     @Published public var isPresentingImportSheet: Bool = false
     @Published public var isPresentingNewTaskSheet: Bool = false
+    @Published public var isPresentingCalendarSubscriptionSheet: Bool = false
+    @Published public var isPresentingNewCalendarEventSheet: Bool = false
     @Published public var importURLInput: String = ""
     @Published public private(set) var importState: ImportSheetState = .idle
     @Published public private(set) var isSyncingSavedLink: Bool = false
@@ -77,6 +97,30 @@ public final class SchoolTrackerViewModel: ObservableObject {
     @Published public var draftTaskDueDate: Date = Date().addingTimeInterval(86_400)
     @Published public var draftTaskNotes: String = ""
     @Published public var draftTaskValidationError: String?
+
+    // Family Portal Calendar Subscription Sheet state
+    @Published public var draftSelectedCalendars: Set<FamilyPortalCalendarCategory> = Set(FamilyPortalCalendarCategory.allCases)
+    @Published public var draftCalendarFeedURLs: [FamilyPortalCalendarCategory: String] = [:]
+    @Published public var calendarSubscriptionValidationError: String?
+    @Published public private(set) var isSyncingCalendars: Bool = false
+    @Published public var calendarSyncStatusMessage: String?
+
+    // Family Portal Calendar Space state
+    @Published public var calendarTimeFilter: CalendarTimeFilter = .all
+    @Published public var calendarDisplayMode: CalendarDisplayMode = .split
+    @Published public var calendarDisplayedMonth: Date = Date()
+    @Published public var calendarSelectedDay: Date?
+    @Published public var calendarSearchQuery: String = ""
+
+    // New Calendar Event draft state
+    @Published public var activeCalendarEventCategory: FamilyPortalCalendarCategory = .school
+    @Published public var draftEventTitle: String = ""
+    @Published public var draftEventCourseName: String = ""
+    @Published public var draftEventStartDate: Date = Date()
+    @Published public var draftEventIsAllDay: Bool = true
+    @Published public var draftEventLocation: String = ""
+    @Published public var draftEventNotes: String = ""
+    @Published public var draftEventValidationError: String?
 
     private let store: SchoolTrackerStore
     private let client: RenWebClient
@@ -119,6 +163,14 @@ public final class SchoolTrackerViewModel: ObservableObject {
 
     public var savedLinkExpirationSummary: String? {
         state.savedLink?.expirationSummaryText()
+    }
+
+    public var subscribedCalendarCategories: [FamilyPortalCalendarCategory] {
+        state.subscribedCategories
+    }
+
+    public var totalSubscribedCalendarEventsCount: Int {
+        subscribedCalendarCategories.reduce(0) { $0 + state.events(for: $1).count }
     }
 
     public var filteredTasks: [TrackedTask] {
@@ -179,6 +231,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
         do {
             let loaded = try store.loadState()
             state = loaded
+            draftSelectedCalendars = Set(loaded.subscribedCategories)
             refreshLoadState()
         } catch {
             loadState = .error(error.localizedDescription)
@@ -186,7 +239,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
     }
 
     private func refreshLoadState() {
-        if state.courses.isEmpty && state.tasks.isEmpty && state.savedLink == nil {
+        if state.courses.isEmpty && state.tasks.isEmpty && state.savedLink == nil && state.calendarEvents.isEmpty {
             loadState = .empty
         } else {
             loadState = .loaded
@@ -338,6 +391,279 @@ public final class SchoolTrackerViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Family Portal Calendar Subscriptions & Space Management
+
+    public func openCalendarSubscriptionSheet() {
+        let currentSubscribed = Set(state.subscribedCategories)
+        draftSelectedCalendars = currentSubscribed.isEmpty
+            ? Set(FamilyPortalCalendarCategory.allCases)
+            : currentSubscribed
+        draftCalendarFeedURLs = [:]
+        calendarSubscriptionValidationError = nil
+        calendarSyncStatusMessage = nil
+        isPresentingCalendarSubscriptionSheet = true
+    }
+
+    public func isDraftCategorySelected(_ category: FamilyPortalCalendarCategory) -> Bool {
+        draftSelectedCalendars.contains(category)
+    }
+
+    public func setDraftCategory(_ category: FamilyPortalCalendarCategory, isSelected: Bool) {
+        if isSelected {
+            draftSelectedCalendars.insert(category)
+        } else {
+            draftSelectedCalendars.remove(category)
+        }
+        if draftSelectedCalendars.isEmpty {
+            calendarSubscriptionValidationError = FamilyPortalCalendarError.atLeastOneCategoryRequired.localizedDescription
+        } else {
+            calendarSubscriptionValidationError = nil
+        }
+    }
+
+    public func draftFeedBinding(for category: FamilyPortalCalendarCategory) -> Binding<String> {
+        Binding(
+            get: { self.draftCalendarFeedURLs[category] ?? "" },
+            set: { newValue in
+                self.draftCalendarFeedURLs[category] = newValue
+                if self.calendarSubscriptionValidationError != nil && !self.draftSelectedCalendars.isEmpty {
+                    self.calendarSubscriptionValidationError = nil
+                }
+            }
+        )
+    }
+
+    public func clearSavedCalendarFeed(for category: FamilyPortalCalendarCategory) {
+        do {
+            let currentCategories = Set(state.subscribedCategories.isEmpty ? [category] : state.subscribedCategories)
+            state = try store.updateCalendarSubscriptions(
+                selectedCategories: currentCategories,
+                feedURLStrings: [category: ""]
+            )
+            draftCalendarFeedURLs[category] = ""
+            calendarSubscriptionValidationError = nil
+        } catch {
+            calendarSubscriptionValidationError = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    public func saveCalendarSubscriptions(syncFeedsAfterSave: Bool = false) async -> Bool {
+        guard !draftSelectedCalendars.isEmpty else {
+            calendarSubscriptionValidationError = FamilyPortalCalendarError.atLeastOneCategoryRequired.localizedDescription
+            return false
+        }
+
+        var nonEmptyFeedChanges: [FamilyPortalCalendarCategory: String] = [:]
+        for (category, rawURL) in draftCalendarFeedURLs {
+            let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                nonEmptyFeedChanges[category] = trimmed
+            }
+        }
+
+        do {
+            let updated = try store.updateCalendarSubscriptions(
+                selectedCategories: draftSelectedCalendars,
+                feedURLStrings: nonEmptyFeedChanges
+            )
+            state = updated
+            calendarSubscriptionValidationError = nil
+            refreshLoadState()
+
+            if case .calendar(let activeCat) = selectedSection, !state.isSubscribed(to: activeCat) {
+                if let firstSubscribed = state.subscribedCategories.first {
+                    selectedSection = .calendar(firstSubscribed)
+                } else {
+                    selectedSection = .overview
+                }
+            }
+
+            if syncFeedsAfterSave {
+                await syncCalendarFeeds(for: nil)
+            }
+            return true
+        } catch let error as FamilyPortalCalendarError {
+            calendarSubscriptionValidationError = error.localizedDescription
+            return false
+        } catch {
+            calendarSubscriptionValidationError = error.localizedDescription
+            return false
+        }
+    }
+
+    public func syncCalendarFeeds(for specificCategory: FamilyPortalCalendarCategory? = nil) async {
+        guard !isSyncingCalendars else { return }
+        let savedFeeds = (try? store.loadSavedCalendarFeedLinks()) ?? [:]
+        let targetCategories: [FamilyPortalCalendarCategory]
+        if let specificCategory {
+            targetCategories = [specificCategory]
+        } else {
+            targetCategories = state.subscribedCategories
+        }
+
+        let categoriesWithFeeds = targetCategories.filter { savedFeeds[$0] != nil }
+        guard !categoriesWithFeeds.isEmpty else {
+            calendarSyncStatusMessage = "Subscribed spaces updated with local course and task events."
+            return
+        }
+
+        isSyncingCalendars = true
+        defer { isSyncingCalendars = false }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 15
+        config.urlCache = nil
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+
+        var syncedEventsTotal = 0
+        for category in categoriesWithFeeds {
+            guard let feedLink = savedFeeds[category] else { continue }
+            do {
+                let (data, response) = try await session.data(from: feedLink.url)
+                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    throw FamilyPortalCalendarError.networkFailure(statusCode: http.statusCode)
+                }
+                let ics = String(data: data, encoding: .utf8)
+                    ?? String(data: data, encoding: .isoLatin1)
+                    ?? ""
+                let updated = try store.applyCalendarICS(ics, for: category)
+                state = updated
+                syncedEventsTotal += state.events(for: category).count
+            } catch {
+                persistenceBannerError = error.localizedDescription
+                return
+            }
+        }
+
+        refreshLoadState()
+        calendarSyncStatusMessage = "Synced \(categoriesWithFeeds.count) calendar feed(s) (\(syncedEventsTotal) total events)."
+    }
+
+    public func openNewCalendarEventSheet(for category: FamilyPortalCalendarCategory) {
+        activeCalendarEventCategory = category
+        draftEventTitle = ""
+        draftEventCourseName = category == .school ? "School" : (state.courses.first?.courseName ?? "")
+        draftEventStartDate = calendarSelectedDay ?? Date()
+        draftEventIsAllDay = true
+        draftEventLocation = ""
+        draftEventNotes = ""
+        draftEventValidationError = nil
+        isPresentingNewCalendarEventSheet = true
+    }
+
+    @discardableResult
+    public func saveDraftCalendarEvent() -> Bool {
+        let cleanTitle = draftEventTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else {
+            draftEventValidationError = "Enter an event title."
+            return false
+        }
+        let cleanCourse = draftEventCourseName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLocation = draftEventLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanNotes = draftEventNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let event = CalendarEvent(
+            category: activeCalendarEventCategory,
+            title: cleanTitle,
+            courseName: cleanCourse.isEmpty ? nil : cleanCourse,
+            startDate: draftEventStartDate,
+            endDate: nil,
+            isAllDay: draftEventIsAllDay,
+            location: cleanLocation.isEmpty ? nil : cleanLocation,
+            notes: cleanNotes.isEmpty ? nil : cleanNotes,
+            source: .manual,
+            isCompleted: false
+        )
+
+        do {
+            state = try store.addCalendarEvent(event)
+            draftEventValidationError = nil
+            refreshLoadState()
+            return true
+        } catch {
+            draftEventValidationError = error.localizedDescription
+            return false
+        }
+    }
+
+    public func toggleCalendarEventCompletion(_ event: CalendarEvent) {
+        if state.calendarEvents.contains(where: { $0.id == event.id }) {
+            do {
+                state = try store.toggleCalendarEventCompletion(event.id)
+                refreshLoadState()
+            } catch {
+                persistenceBannerError = error.localizedDescription
+            }
+            return
+        }
+
+        if state.tasks.contains(where: { $0.id == event.id }) {
+            toggleTaskCompletion(event.id)
+            return
+        }
+
+        for course in state.courses {
+            if course.assignments.contains(where: { $0.id == event.id }) {
+                toggleAssignmentCompletion(courseID: course.id, assignmentID: event.id)
+                return
+            }
+        }
+    }
+
+    public func deleteCalendarEvent(_ event: CalendarEvent) {
+        guard state.calendarEvents.contains(where: { $0.id == event.id }) else { return }
+        do {
+            state = try store.deleteCalendarEvent(event.id)
+            refreshLoadState()
+        } catch {
+            persistenceBannerError = error.localizedDescription
+        }
+    }
+
+    public func shiftDisplayedMonth(by offset: Int) {
+        if let shifted = Calendar.current.date(byAdding: .month, value: offset, to: calendarDisplayedMonth) {
+            calendarDisplayedMonth = shifted
+            calendarSelectedDay = nil
+        }
+    }
+
+    public func jumpToCurrentMonth() {
+        calendarDisplayedMonth = Date()
+        calendarSelectedDay = nil
+    }
+
+    public func filteredEvents(for category: FamilyPortalCalendarCategory) -> [CalendarEvent] {
+        let allEvents = state.events(for: category)
+        let startOfToday = Calendar.current.startOfDay(for: Date())
+        let query = calendarSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        return allEvents.filter { event in
+            if let selectedDay = calendarSelectedDay {
+                if !Calendar.current.isDate(event.startDate, inSameDayAs: selectedDay) {
+                    return false
+                }
+            } else {
+                switch calendarTimeFilter {
+                case .upcoming:
+                    if event.startDate < startOfToday { return false }
+                case .past:
+                    if event.startDate >= startOfToday { return false }
+                case .all:
+                    break
+                }
+            }
+
+            guard !query.isEmpty else { return true }
+            return event.title.lowercased().contains(query)
+                || (event.courseName?.lowercased().contains(query) ?? false)
+                || (event.location?.lowercased().contains(query) ?? false)
+                || (event.notes?.lowercased().contains(query) ?? false)
+        }
+    }
+
     // MARK: - Tasks & Assignment Mutations
 
     public func addTask(title: String, courseName: String, dueDate: Date?, notes: String?) {
@@ -425,6 +751,17 @@ public final class SchoolTrackerViewModel: ObservableObject {
             return "clock.badge.exclamationmark"
         case .expired:
             return "exclamationmark.triangle.fill"
+        }
+    }
+
+    public static func calendarCategoryTint(for category: FamilyPortalCalendarCategory) -> Color {
+        switch category {
+        case .school:
+            return .indigo
+        case .classrooms:
+            return .blue
+        case .homework:
+            return .teal
         }
     }
 }

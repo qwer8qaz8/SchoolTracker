@@ -417,7 +417,110 @@ final class SchoolTrackerCoreTests: XCTestCase {
         XCTAssertNil(try store.loadState().savedLink)
     }
 
-    // MARK: - 6. Working Tree Secret & PII Audit
+    // MARK: - 6. Family Portal Calendar Subscriptions, .ics Parser & Category Space Isolation Tests
+
+    func testFamilyPortalCalendarLinkParserNormalizesWebcalAndRedactsTokens() throws {
+        let parsed = try FamilyPortalCalendarLinkParser.parse(
+            AnonymizedReportFixtures.validWebcalFeedURL,
+            for: .school
+        )
+        XCTAssertEqual(parsed.category, .school)
+        XCTAssertEqual(parsed.url.scheme?.lowercased(), "https")
+        XCTAssertFalse(parsed.redactedDescription.contains(AnonymizedReportFixtures.validSessionID))
+        XCTAssertTrue(parsed.redactedDescription.contains("REDACTED"))
+
+        let invalidFeeds = [
+            "",
+            "   ",
+            "http://test-xx.client.factsmgt.com/renweb/calendar/feed.ics",
+            "ftp://test-xx.client.factsmgt.com/renweb/calendar/feed.ics"
+        ]
+        for candidate in invalidFeeds {
+            XCTAssertThrowsError(try FamilyPortalCalendarLinkParser.parse(candidate, for: .school)) { error in
+                XCTAssertEqual(error as? FamilyPortalCalendarError, .invalidFeedURL)
+            }
+        }
+    }
+
+    func testFamilyPortalICalendarParserExtractsEventsPerCategory() throws {
+        let schoolEvents = try FamilyPortalICalendarParser.parse(
+            ics: AnonymizedReportFixtures.schoolCalendarICS,
+            category: .school
+        )
+        XCTAssertEqual(schoolEvents.count, 2)
+        XCTAssertEqual(schoolEvents[0].category, .school)
+        XCTAssertTrue(schoolEvents[0].isAllDay)
+        XCTAssertEqual(schoolEvents[0].title, "Thanksgiving Break - Campus Closed")
+        XCTAssertEqual(schoolEvents[0].location, "All Campuses")
+
+        XCTAssertEqual(schoolEvents[1].category, .school)
+        XCTAssertFalse(schoolEvents[1].isAllDay)
+        XCTAssertTrue(schoolEvents[1].title.contains("Fall Academic Showcase"))
+        XCTAssertEqual(schoolEvents[1].location, "Main Auditorium, Building A")
+
+        XCTAssertThrowsError(try FamilyPortalICalendarParser.parse(ics: "", category: .homework)) { error in
+            guard case .parseFailure = error as? FamilyPortalCalendarError else {
+                XCTFail("Expected .parseFailure, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testFamilyPortalCalendarSubscriptionsRequireAtLeastOneAndIsolateCategorySpaces() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SchoolTrackerCalendarTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let stateURL = tempDir.appendingPathComponent("state.json", isDirectory: false)
+        let store = SchoolTrackerStore(stateFileURL: stateURL)
+
+        // 1. Selecting 0 categories must throw .atLeastOneCategoryRequired ("Choose at least 1 option above.")
+        XCTAssertThrowsError(
+            try store.updateCalendarSubscriptions(selectedCategories: [], feedURLStrings: [:])
+        ) { error in
+            XCTAssertEqual(error as? FamilyPortalCalendarError, .atLeastOneCategoryRequired)
+            XCTAssertTrue((error.localizedDescription).contains("Choose at least 1 option above"))
+        }
+
+        // 2. Persisting 1-3 selected categories saves 0600 credentials in saved-calendars.json and redacts state.json
+        let stateAfterSub = try store.updateCalendarSubscriptions(
+            selectedCategories: [.school, .classrooms, .homework],
+            feedURLStrings: [.school: AnonymizedReportFixtures.validWebcalFeedURL]
+        )
+        XCTAssertEqual(stateAfterSub.calendarSubscriptions.filter(\.isSubscribed).count, 3)
+
+        let credPath = store.savedCalendarsCredentialFileURL.path
+        XCTAssertTrue(FileManager.default.fileExists(atPath: credPath))
+        let attrs = try FileManager.default.attributesOfItem(atPath: credPath)
+        if let perms = attrs[.posixPermissions] as? NSNumber {
+            XCTAssertEqual(perms.intValue & 0o777, 0o600)
+        }
+
+        let rawStateJSON = try String(contentsOf: stateURL, encoding: .utf8)
+        XCTAssertFalse(rawStateJSON.contains(AnonymizedReportFixtures.validSessionID))
+        XCTAssertTrue(rawStateJSON.contains("REDACTED"))
+
+        // 3. Ingesting .ics feeds per category isolates events into School, My Classrooms, and My Homework spaces
+        try store.applyCalendarICS(AnonymizedReportFixtures.schoolCalendarICS, for: .school)
+        try store.applyCalendarICS(AnonymizedReportFixtures.classroomsCalendarICS, for: .classrooms)
+        try store.applyCalendarICS(AnonymizedReportFixtures.homeworkCalendarICS, for: .homework)
+
+        let loadedState = try store.loadState()
+        let schoolSpaceEvents = loadedState.events(for: .school)
+        let classroomSpaceEvents = loadedState.events(for: .classrooms)
+        let homeworkSpaceEvents = loadedState.events(for: .homework)
+
+        XCTAssertTrue(schoolSpaceEvents.allSatisfy { $0.category == .school })
+        XCTAssertTrue(schoolSpaceEvents.contains { $0.title == "Thanksgiving Break - Campus Closed" })
+
+        XCTAssertTrue(classroomSpaceEvents.allSatisfy { $0.category == .classrooms })
+        XCTAssertTrue(classroomSpaceEvents.contains { $0.title == "AP Calculus BC - Taylor Series Seminar" })
+
+        XCTAssertTrue(homeworkSpaceEvents.allSatisfy { $0.category == .homework })
+        XCTAssertTrue(homeworkSpaceEvents.contains { $0.title == "Honors Chemistry - Titration Lab Post-Lab Questions" })
+    }
+
+    // MARK: - 7. Working Tree Secret & PII Audit
 
     func testRepositoryWorkingTreeContainsNoLiveTokens() throws {
         let testFileURL = URL(fileURLWithPath: #filePath)
@@ -484,6 +587,9 @@ struct StandaloneTestRunner {
             ("testSchoolTrackerStoreReimportPreservesCourseIDsAndAssignmentCompletion", suite.testSchoolTrackerStoreReimportPreservesCourseIDsAndAssignmentCompletion),
             ("testSavedRenWebLinkExpirationStatuses", suite.testSavedRenWebLinkExpirationStatuses),
             ("testSavedLinkCredentialStoreRoundTripPermissionsAndClear", suite.testSavedLinkCredentialStoreRoundTripPermissionsAndClear),
+            ("testFamilyPortalCalendarLinkParserNormalizesWebcalAndRedactsTokens", suite.testFamilyPortalCalendarLinkParserNormalizesWebcalAndRedactsTokens),
+            ("testFamilyPortalICalendarParserExtractsEventsPerCategory", suite.testFamilyPortalICalendarParserExtractsEventsPerCategory),
+            ("testFamilyPortalCalendarSubscriptionsRequireAtLeastOneAndIsolateCategorySpaces", suite.testFamilyPortalCalendarSubscriptionsRequireAtLeastOneAndIsolateCategorySpaces),
             ("testRepositoryWorkingTreeContainsNoLiveTokens", suite.testRepositoryWorkingTreeContainsNoLiveTokens)
         ]
         let asyncTests: [(String, () async throws -> Void)] = [

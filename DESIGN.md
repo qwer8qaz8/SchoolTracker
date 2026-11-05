@@ -1,28 +1,29 @@
-# One-Page Design Note: SchoolTracker macOS App & FACTS/RenWeb Report Boundary
+# One-Page Design Note: SchoolTracker macOS App & FACTS/RenWeb Report & Calendar Boundaries
 
 ## Context & Goal
-Build a native macOS school tracker app (`SchoolTracker`) that tracks courses, grades, and assignments, imports grades from temporary FACTS/RenWeb email report links (`GetReport.cfm`), saves the active temporary link locally with expiration tracking for one-click re-syncs, and ships to a GitHub repository with zero sensitive data (SessionIDs, district codes, student PII, or real grade reports) in git history.
+Build a native macOS school tracker app (`SchoolTracker`, with a custom macOS `.icns` icon) that tracks courses, grades, assignments, and Family Portal calendars (`School`, `My Classrooms`, `My Homework` in dedicated spaces), imports grades from temporary FACTS/RenWeb email report links (`GetReport.cfm`), saves the active temporary link and calendar subscription URLs locally, and ships to GitHub with zero sensitive data (SessionIDs, calendar tokens, district codes, student PII, or real grade/calendar payloads) in git history.
 
 ## Architecture & Technology Choices
 - **Boring, testable stack:** Swift Package (`Package.swift`, macOS 14+) split into two targets:
-  1. `SchoolTrackerCore` (library): URL validation/redaction, FACTS/RenWeb HTTP fetcher, HTML report parser, saved-link credential & expiration store, local persistence store, and domain models.
-  2. `SchoolTrackerApp` (executable): Native SwiftUI macOS interface consuming `SchoolTrackerCore`.
+  1. `SchoolTrackerCore` (library): URL validation/redaction, FACTS/RenWeb HTTP fetcher, HTML report parser, iCalendar (`.ics`) feed parser & fetcher, saved-link & calendar credential store, local persistence store, and domain models.
+  2. `SchoolTrackerApp` (executable): Native SwiftUI macOS interface consuming `SchoolTrackerCore`, packaged with a custom `AppIcon.icns`.
 - **Why:** Standard SwiftPM builds and tests cleanly from the CLI (`swift build`, `./scripts/run-tests.sh`) without brittle Xcode project files, and keeps UI decoupled from parsing and network boundaries.
 
-## Service Boundary: FACTS/RenWeb Report Ingestion & Saved Link Expiration
+## Service Boundary 1: FACTS/RenWeb Report Ingestion & Saved Link Expiration
 - **Endpoint pattern:** `https://<subdomains>.factsmgt.com/renweb/email/GetReport.cfm?District=<DISTRICT>&SessionID=<SESSION_ID>`
-- **Input contract:**
-  - `RenWebLinkParser` validates HTTPS scheme, allowed FACTS/RenWeb host, and presence of `District` and `SessionID` query parameters.
-  - Redaction rule: Any log, telemetry event, or `state.json` entry must mask `SessionID` (`REDACTED`) and never emit raw student HTML.
-- **Saved Link & Expiration Contract:**
-  - `SavedRenWebLink` stores `district`, `redactedURL`, `savedAt`, `expiresAt` (parsed from the report HTML if an explicit expiry date is present, otherwise defaulting to FACTS/RenWeb's 14-day temporary email link window from `savedAt`), `lastVerifiedAt`, and `isConfirmedExpired`.
-  - The raw unredacted URL is persisted separately in `~/Library/Application Support/SchoolTracker/saved-link.json` with `0600` owner-only permissions (never in `state.json` or logs) so the user can re-sync in one click (`Sync Saved Link`) without re-pasting, and clear it at any time.
-  - Expiration state (`SavedLinkExpirationStatus`): `.active(daysRemaining: Int, hoursRemaining: Int, expiresAt: Date)`, `.expiringSoon(hoursRemaining: Int, expiresAt: Date)` (<48h left), or `.expired(expiresAt: Date, confirmedByServer: Bool)` (when `now >= expiresAt` or when `RenWebClient` receives `.expiredOrInvalidSession`, which immediately flips `isConfirmedExpired = true`).
-- **Response & Error contract:**
-  - `RenWebClient` fetches the HTML payload with a 15s timeout and explicit `RenWebError` cases: `.invalidURL`, `.expiredOrInvalidSession`, `.networkFailure(statusCode: Int?)`, `.parseFailure(reason: String)`.
-  - `RenWebReportParser` extracts courses, current averages/letter grades, assignment rows, and any explicit report expiration date from the HTML report into `ImportedGradeReport`.
+- **Input contract:** `RenWebLinkParser` validates HTTPS scheme, allowed FACTS/RenWeb host, and presence of `District` and `SessionID` query parameters, masking `SessionID=REDACTED` in logs and `state.json`.
+- **Saved Link & Expiration Contract:** `SavedRenWebLink` stores `district`, `redactedURL`, `savedAt`, `expiresAt` (parsed from HTML or defaulting to 14 days from `savedAt`), `lastVerifiedAt`, and `isConfirmedExpired`. The raw URL is stored in `~/Library/Application Support/SchoolTracker/saved-link.json` (`0600`).
+- **Response & Error contract:** `RenWebClient` fetches the HTML payload (15s timeout) and `RenWebReportParser` extracts courses, averages/letter grades, assignments, and explicit expiry into `ImportedGradeReport`.
+
+## Service Boundary 2: Family Portal Calendar Subscriptions (`School`, `My Classrooms`, `My Homework`)
+- **Categories & Dedicated Spaces:** `FamilyPortalCalendarCategory` defines three separate calendar spaces matching FACTS Family Portal subscriptions: `.school` ("School"), `.classrooms` ("My Classrooms"), and `.homework` ("My Homework"). Each category has its own dedicated sidebar navigation space (`SidebarSection.calendar(FamilyPortalCalendarCategory)`) plus a subscription chooser sheet enforcing at least 1 selected category (`Choose which Family Portal calendars you would like to subscribe to`, `Choose at least 1 option above`).
+- **Input & Redaction Contract:**
+  - `FamilyPortalCalendarLinkParser` accepts `https://` or `webcal://` (normalized to `https://`) calendar feed URLs, validates scheme/host/length (<= 4 KB), and masks query/path tokens (`token`, `key`, `auth`, `sessionid`, `id`, or long hex/UUID segments) as `REDACTED` in `state.json` and logs.
+  - Raw calendar feed URLs are stored in `~/Library/Application Support/SchoolTracker/saved-calendars.json` (`0600` owner-only permissions), while `state.json` stores `FamilyPortalCalendarSubscription` (`category`, `isEnabled`, `redactedFeedURL`, `lastSyncedAt`) and `calendars: [FamilyPortalCalendarCategory: [CalendarEvent]]`.
+- **Feed & Local Synthesis Contract:**
+  - `FamilyPortalICalendarParser` parses RFC 5545 `VEVENT` blocks (`UID`, `SUMMARY`, `DTSTART`, `DTEND`, `DESCRIPTION`, `LOCATION`, `CATEGORIES`, folded lines, and escaped text) into `CalendarEvent`.
+  - When a category is subscribed without an external `.ics` URL (or alongside one), `SchoolTrackerStore` also projects imported course assignments (`.homework`), course sessions/exams (`.classrooms`), and tracked school-wide dates (`.school`) into their respective category space so each space is immediately useful.
 
 ## Security & Git Hygiene Boundary
-- **Forbidden in git:** The user-supplied `District` (`<REDACTED_DISTRICT>`), `SessionID` (`<REDACTED_SESSION_ID>`), live HTML responses, student names, and local database/credential files must never enter the repository or test fixtures.
-- **Allowed in git:** Synthetic test fixtures using `District=TEST-XX` and `SessionID=00000000-0000-0000-0000-000000000000` with anonymized HTML structure matching the live report layout.
-- **Local storage:** Runtime state saves to `~/Library/Application Support/SchoolTracker/state.json` and the active link credential saves to `~/Library/Application Support/SchoolTracker/saved-link.json` (`0600`), both excluded via `.gitignore`.
+- **Forbidden in git:** Live `District`, `SessionID`, calendar feed tokens, live HTML/ICS responses, student names, and local database/credential files (`state.json`, `saved-link.json`, `saved-calendars.json`).
+- **Allowed in git:** Synthetic test fixtures using `District=TEST-XX`, `SessionID=00000000-0000-0000-0000-000000000000`, and anonymized `.ics` feeds.

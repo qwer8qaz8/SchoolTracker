@@ -336,6 +336,121 @@ public struct TrackedTask: Codable, Equatable, Hashable, Identifiable, Sendable 
     }
 }
 
+// MARK: - Family Portal Calendar Categories, Subscriptions & Events
+
+public enum FamilyPortalCalendarCategory: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case school = "School"
+    case classrooms = "My Classrooms"
+    case homework = "My Homework"
+
+    public var id: String { rawValue }
+
+    public var displayName: String { rawValue }
+
+    public var subtitle: String {
+        switch self {
+        case .school:
+            return "Campus-wide events, holidays, athletics, and assemblies"
+        case .classrooms:
+            return "Class sessions, seminars, labs, exams, and room schedules"
+        case .homework:
+            return "Course assignments, due dates, and study deliverables"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .school:
+            return "building.columns.fill"
+        case .classrooms:
+            return "person.3.sequence.fill"
+        case .homework:
+            return "checklist.checked"
+        }
+    }
+}
+
+public struct FamilyPortalCalendarSubscription: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public var category: FamilyPortalCalendarCategory
+    public var isSubscribed: Bool
+    public var redactedFeedURL: String?
+    public var lastSyncedAt: Date?
+
+    public var id: String { category.rawValue }
+
+    public var isEnabled: Bool {
+        get { isSubscribed }
+        set { isSubscribed = newValue }
+    }
+
+    public init(
+        category: FamilyPortalCalendarCategory,
+        isSubscribed: Bool = false,
+        redactedFeedURL: String? = nil,
+        lastSyncedAt: Date? = nil
+    ) {
+        self.category = category
+        self.isSubscribed = isSubscribed
+        self.redactedFeedURL = redactedFeedURL.map(SchoolTrackerTelemetry.redactSensitiveTokens)
+        self.lastSyncedAt = lastSyncedAt
+    }
+
+    public static func defaultSubscriptions() -> [FamilyPortalCalendarSubscription] {
+        FamilyPortalCalendarCategory.allCases.map { category in
+            FamilyPortalCalendarSubscription(category: category, isSubscribed: true)
+        }
+    }
+}
+
+public enum CalendarEventSource: String, Codable, Equatable, Hashable, Sendable {
+    case icalFeed
+    case importedReport
+    case manual
+}
+
+public struct CalendarEvent: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public var id: UUID
+    public var uid: String?
+    public var category: FamilyPortalCalendarCategory
+    public var title: String
+    public var courseName: String?
+    public var startDate: Date
+    public var endDate: Date?
+    public var isAllDay: Bool
+    public var location: String?
+    public var notes: String?
+    public var source: CalendarEventSource
+    public var isCompleted: Bool
+
+    public init(
+        id: UUID = UUID(),
+        uid: String? = nil,
+        category: FamilyPortalCalendarCategory,
+        title: String,
+        courseName: String? = nil,
+        startDate: Date,
+        endDate: Date? = nil,
+        isAllDay: Bool = false,
+        location: String? = nil,
+        notes: String? = nil,
+        source: CalendarEventSource = .manual,
+        isCompleted: Bool = false
+    ) {
+        self.id = id
+        self.uid = uid
+        self.category = category
+        self.title = title
+        self.courseName = courseName
+        self.startDate = startDate
+        self.endDate = endDate
+        self.isAllDay = isAllDay
+        self.location = location
+        self.notes = notes
+        self.source = source
+        self.isCompleted = isCompleted
+    }
+}
+
 public struct SchoolTrackerState: Codable, Equatable, Sendable {
     public var courses: [ImportedCourse]
     public var tasks: [TrackedTask]
@@ -343,6 +458,8 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
     public var lastSyncedDistrict: String?
     public var lastRedactedReportURL: String?
     public var savedLink: SavedRenWebLink?
+    public var calendarSubscriptions: [FamilyPortalCalendarSubscription]
+    public var calendarEvents: [CalendarEvent]
 
     public init(
         courses: [ImportedCourse] = [],
@@ -350,7 +467,9 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
         lastSyncedAt: Date? = nil,
         lastSyncedDistrict: String? = nil,
         lastRedactedReportURL: String? = nil,
-        savedLink: SavedRenWebLink? = nil
+        savedLink: SavedRenWebLink? = nil,
+        calendarSubscriptions: [FamilyPortalCalendarSubscription] = FamilyPortalCalendarSubscription.defaultSubscriptions(),
+        calendarEvents: [CalendarEvent] = []
     ) {
         self.courses = courses
         self.tasks = tasks
@@ -358,11 +477,83 @@ public struct SchoolTrackerState: Codable, Equatable, Sendable {
         self.lastSyncedDistrict = lastSyncedDistrict
         self.lastRedactedReportURL = lastRedactedReportURL
         self.savedLink = savedLink
+        self.calendarSubscriptions = calendarSubscriptions.isEmpty
+            ? FamilyPortalCalendarSubscription.defaultSubscriptions()
+            : calendarSubscriptions
+        self.calendarEvents = calendarEvents
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case courses
+        case tasks
+        case lastSyncedAt
+        case lastSyncedDistrict
+        case lastRedactedReportURL
+        case savedLink
+        case calendarSubscriptions
+        case calendarEvents
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.courses = try container.decodeIfPresent([ImportedCourse].self, forKey: .courses) ?? []
+        self.tasks = try container.decodeIfPresent([TrackedTask].self, forKey: .tasks) ?? []
+        self.lastSyncedAt = try container.decodeIfPresent(Date.self, forKey: .lastSyncedAt)
+        self.lastSyncedDistrict = try container.decodeIfPresent(String.self, forKey: .lastSyncedDistrict)
+        self.lastRedactedReportURL = try container.decodeIfPresent(String.self, forKey: .lastRedactedReportURL)
+        self.savedLink = try container.decodeIfPresent(SavedRenWebLink.self, forKey: .savedLink)
+        let decodedSubs = try container.decodeIfPresent([FamilyPortalCalendarSubscription].self, forKey: .calendarSubscriptions)
+        self.calendarSubscriptions = (decodedSubs?.isEmpty == false)
+            ? decodedSubs!
+            : FamilyPortalCalendarSubscription.defaultSubscriptions()
+        self.calendarEvents = try container.decodeIfPresent([CalendarEvent].self, forKey: .calendarEvents) ?? []
     }
 
     public var overallAverage: Double? {
         let grades = courses.compactMap(\.numericAverage)
         guard !grades.isEmpty else { return nil }
         return grades.reduce(0, +) / Double(grades.count)
+    }
+
+    public var subscribedCategories: [FamilyPortalCalendarCategory] {
+        FamilyPortalCalendarCategory.allCases.filter { isSubscribed(to: $0) }
+    }
+
+    public func isSubscribed(to category: FamilyPortalCalendarCategory) -> Bool {
+        calendarSubscriptions.first(where: { $0.category == category })?.isSubscribed ?? false
+    }
+
+    public func subscription(for category: FamilyPortalCalendarCategory) -> FamilyPortalCalendarSubscription {
+        calendarSubscriptions.first(where: { $0.category == category })
+            ?? FamilyPortalCalendarSubscription(category: category, isSubscribed: false)
+    }
+
+    /// Returns all events isolated to the requested Family Portal calendar space (`School`, `My Classrooms`, or `My Homework`).
+    public func events(for category: FamilyPortalCalendarCategory) -> [CalendarEvent] {
+        let directEvents = calendarEvents.filter { $0.category == category }
+        let synthesized = FamilyPortalCalendarEventSynthesizer.synthesizeEvents(
+            for: category,
+            courses: courses,
+            tasks: tasks
+        )
+        var combined = directEvents
+        for candidate in synthesized {
+            let duplicateExists = combined.contains { existing in
+                if let u1 = existing.uid, let u2 = candidate.uid, u1 == u2 {
+                    return true
+                }
+                return existing.title.caseInsensitiveCompare(candidate.title) == .orderedSame
+                    && Calendar.current.isDate(existing.startDate, inSameDayAs: candidate.startDate)
+            }
+            if !duplicateExists {
+                combined.append(candidate)
+            }
+        }
+        return combined.sorted { lhs, rhs in
+            if lhs.startDate != rhs.startDate {
+                return lhs.startDate < rhs.startDate
+            }
+            return lhs.title < rhs.title
+        }
     }
 }

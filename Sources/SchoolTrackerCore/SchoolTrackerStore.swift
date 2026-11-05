@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - Local Persistence Store (~/Library/Application Support/SchoolTracker/state.json & saved-link.json)
+// MARK: - Local Persistence Store (~/Library/Application Support/SchoolTracker/state.json, saved-link.json & saved-calendars.json)
 
 public enum PersistenceError: Error, Equatable, LocalizedError, Sendable {
     case readFailed(reason: String)
@@ -27,22 +27,36 @@ private struct StoredRenWebLinkCredential: Codable, Equatable, Sendable {
     var expiresAt: Date
 }
 
+private struct StoredCalendarFeedCredentialRecord: Codable, Equatable, Sendable {
+    var categoryRawValue: String
+    var urlString: String
+    var updatedAt: Date
+}
+
+private struct StoredCalendarsCredentialFile: Codable, Equatable, Sendable {
+    var feeds: [StoredCalendarFeedCredentialRecord]
+    var updatedAt: Date
+}
+
 public final class SchoolTrackerStore: @unchecked Sendable {
     public let stateFileURL: URL
     public let savedLinkCredentialFileURL: URL
+    public let savedCalendarsCredentialFileURL: URL
     private let lock = NSRecursiveLock()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     public init(
         stateFileURL: URL = SchoolTrackerStore.defaultStateFileURL(),
-        savedLinkCredentialFileURL: URL? = nil
+        savedLinkCredentialFileURL: URL? = nil,
+        savedCalendarsCredentialFileURL: URL? = nil
     ) {
         self.stateFileURL = stateFileURL
+        let baseDir = stateFileURL.deletingLastPathComponent()
         self.savedLinkCredentialFileURL = savedLinkCredentialFileURL
-            ?? stateFileURL
-                .deletingLastPathComponent()
-                .appendingPathComponent("saved-link.json", isDirectory: false)
+            ?? baseDir.appendingPathComponent("saved-link.json", isDirectory: false)
+        self.savedCalendarsCredentialFileURL = savedCalendarsCredentialFileURL
+            ?? baseDir.appendingPathComponent("saved-calendars.json", isDirectory: false)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -71,6 +85,13 @@ public final class SchoolTrackerStore: @unchecked Sendable {
             .appendingPathComponent("saved-link.json", isDirectory: false)
     }
 
+    /// Resolves `~/Library/Application Support/SchoolTracker/saved-calendars.json`.
+    public static func defaultSavedCalendarsCredentialFileURL() -> URL {
+        defaultStateFileURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("saved-calendars.json", isDirectory: false)
+    }
+
     public func loadState() throws -> SchoolTrackerState {
         lock.lock()
         defer { lock.unlock() }
@@ -93,7 +114,7 @@ public final class SchoolTrackerStore: @unchecked Sendable {
             let state = try decoder.decode(SchoolTrackerState.self, from: data)
             SchoolTrackerTelemetry.shared.increment(
                 .stateLoadSuccess,
-                context: "courses=\(state.courses.count) tasks=\(state.tasks.count)"
+                context: "courses=\(state.courses.count) tasks=\(state.tasks.count) calendarEvents=\(state.calendarEvents.count)"
             )
             return state
         } catch {
@@ -114,6 +135,13 @@ public final class SchoolTrackerStore: @unchecked Sendable {
             savedLink.redactedURL = SchoolTrackerTelemetry.redactSensitiveTokens(in: savedLink.redactedURL)
             sanitizedState.savedLink = savedLink
         }
+        sanitizedState.calendarSubscriptions = sanitizedState.calendarSubscriptions.map { sub in
+            var copy = sub
+            if let rawFeedURL = copy.redactedFeedURL {
+                copy.redactedFeedURL = SchoolTrackerTelemetry.redactSensitiveTokens(in: rawFeedURL)
+            }
+            return copy
+        }
 
         let directoryURL = stateFileURL.deletingLastPathComponent()
         do {
@@ -126,7 +154,7 @@ public final class SchoolTrackerStore: @unchecked Sendable {
             try data.write(to: stateFileURL, options: [.atomic])
             SchoolTrackerTelemetry.shared.increment(
                 .stateSaveSuccess,
-                context: "courses=\(sanitizedState.courses.count) tasks=\(sanitizedState.tasks.count)"
+                context: "courses=\(sanitizedState.courses.count) tasks=\(sanitizedState.tasks.count) calendarEvents=\(sanitizedState.calendarEvents.count)"
             )
         } catch {
             SchoolTrackerTelemetry.shared.increment(.stateSaveFailure, context: "io_write_error")
@@ -300,6 +328,190 @@ public final class SchoolTrackerStore: @unchecked Sendable {
         return state
     }
 
+    // MARK: - Family Portal Calendar Subscriptions & .ics Feed Persistence
+
+    @discardableResult
+    public func updateCalendarSubscriptions(
+        selectedCategories: Set<FamilyPortalCalendarCategory>,
+        feedURLStrings: [FamilyPortalCalendarCategory: String] = [:],
+        updatedAt: Date = Date()
+    ) throws -> SchoolTrackerState {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !selectedCategories.isEmpty else {
+            SchoolTrackerTelemetry.shared.increment(
+                .calendarSubscriptionUpdateFailure,
+                context: "empty_selected_categories"
+            )
+            throw FamilyPortalCalendarError.atLeastOneCategoryRequired
+        }
+
+        var validatedFeeds: [FamilyPortalCalendarCategory: ValidatedCalendarFeedLink] = (try? loadSavedCalendarFeedLinks()) ?? [:]
+        for (category, rawString) in feedURLStrings {
+            let trimmed = rawString.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                validatedFeeds.removeValue(forKey: category)
+            } else {
+                let parsed = try FamilyPortalCalendarLinkParser.parse(trimmed, for: category)
+                validatedFeeds[category] = parsed
+            }
+        }
+
+        try writeCalendarsCredentialFile(feeds: validatedFeeds, updatedAt: updatedAt)
+
+        var state = (try? loadState()) ?? SchoolTrackerState()
+        let existingByCategory = Dictionary(
+            uniqueKeysWithValues: state.calendarSubscriptions.map { ($0.category, $0) }
+        )
+
+        state.calendarSubscriptions = FamilyPortalCalendarCategory.allCases.map { category in
+            let previous = existingByCategory[category]
+            let redactedURL = validatedFeeds[category]?.redactedDescription
+                ?? (feedURLStrings[category]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
+                    ? nil
+                    : previous?.redactedFeedURL)
+            return FamilyPortalCalendarSubscription(
+                category: category,
+                isSubscribed: selectedCategories.contains(category),
+                redactedFeedURL: redactedURL,
+                lastSyncedAt: previous?.lastSyncedAt
+            )
+        }
+
+        try saveState(state)
+        SchoolTrackerTelemetry.shared.increment(
+            .calendarSubscriptionUpdateSuccess,
+            context: "subscribed=\(selectedCategories.map(\.rawValue).sorted().joined(separator: ","))"
+        )
+        return state
+    }
+
+    public func loadSavedCalendarFeedLinks() throws -> [FamilyPortalCalendarCategory: ValidatedCalendarFeedLink] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard FileManager.default.fileExists(atPath: savedCalendarsCredentialFileURL.path) else {
+            return [:]
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: savedCalendarsCredentialFileURL)
+        } catch {
+            throw PersistenceError.readFailed(reason: error.localizedDescription)
+        }
+
+        let credentialFile: StoredCalendarsCredentialFile
+        do {
+            credentialFile = try decoder.decode(StoredCalendarsCredentialFile.self, from: data)
+        } catch {
+            throw PersistenceError.decodeFailed(reason: error.localizedDescription)
+        }
+
+        var result: [FamilyPortalCalendarCategory: ValidatedCalendarFeedLink] = [:]
+        for entry in credentialFile.feeds {
+            guard let category = FamilyPortalCalendarCategory(rawValue: entry.categoryRawValue) else {
+                continue
+            }
+            if let validated = try? FamilyPortalCalendarLinkParser.parse(entry.urlString, for: category) {
+                result[category] = validated
+            }
+        }
+        return result
+    }
+
+    @discardableResult
+    public func applyCalendarICS(
+        _ ics: String,
+        for category: FamilyPortalCalendarCategory,
+        syncedAt: Date = Date()
+    ) throws -> SchoolTrackerState {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let parsedEvents = try FamilyPortalICalendarParser.parse(ics: ics, category: category)
+        var state = (try? loadState()) ?? SchoolTrackerState()
+
+        let existingCategoryFeedEvents = state.calendarEvents.filter {
+            $0.category == category && $0.source == .icalFeed
+        }
+        let retainedEvents = state.calendarEvents.filter {
+            $0.category != category || $0.source != .icalFeed
+        }
+
+        var usedIDs = Set<UUID>()
+        let mergedFeedEvents: [CalendarEvent] = parsedEvents.map { incoming in
+            var merged = incoming
+            if let match = existingCategoryFeedEvents.first(where: { candidate in
+                guard !usedIDs.contains(candidate.id) else { return false }
+                if let incomingUID = incoming.uid, let candidateUID = candidate.uid, !incomingUID.isEmpty {
+                    return incomingUID == candidateUID
+                }
+                return candidate.title.caseInsensitiveCompare(incoming.title) == .orderedSame
+                    && candidate.startDate == incoming.startDate
+            }) {
+                usedIDs.insert(match.id)
+                merged.id = match.id
+                merged.isCompleted = match.isCompleted
+            }
+            return merged
+        }
+
+        state.calendarEvents = retainedEvents + mergedFeedEvents
+
+        if let subIndex = state.calendarSubscriptions.firstIndex(where: { $0.category == category }) {
+            state.calendarSubscriptions[subIndex].lastSyncedAt = syncedAt
+        } else {
+            state.calendarSubscriptions.append(
+                FamilyPortalCalendarSubscription(
+                    category: category,
+                    isSubscribed: true,
+                    redactedFeedURL: nil,
+                    lastSyncedAt: syncedAt
+                )
+            )
+        }
+
+        try saveState(state)
+        return state
+    }
+
+    @discardableResult
+    public func addCalendarEvent(_ event: CalendarEvent) throws -> SchoolTrackerState {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var state = (try? loadState()) ?? SchoolTrackerState()
+        state.calendarEvents.append(event)
+        try saveState(state)
+        return state
+    }
+
+    @discardableResult
+    public func toggleCalendarEventCompletion(_ eventID: UUID) throws -> SchoolTrackerState {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var state = (try? loadState()) ?? SchoolTrackerState()
+        if let index = state.calendarEvents.firstIndex(where: { $0.id == eventID }) {
+            state.calendarEvents[index].isCompleted.toggle()
+            try saveState(state)
+        }
+        return state
+    }
+
+    @discardableResult
+    public func deleteCalendarEvent(_ eventID: UUID) throws -> SchoolTrackerState {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var state = (try? loadState()) ?? SchoolTrackerState()
+        state.calendarEvents.removeAll { $0.id == eventID }
+        try saveState(state)
+        return state
+    }
+
     private func loadStoredCredentialRecord() throws -> StoredRenWebLinkCredential? {
         guard FileManager.default.fileExists(atPath: savedLinkCredentialFileURL.path) else {
             return nil
@@ -335,6 +547,41 @@ public final class SchoolTrackerStore: @unchecked Sendable {
             )
         } catch {
             SchoolTrackerTelemetry.shared.increment(.savedLinkSaveFailure, context: "credential_io_write_error")
+            throw PersistenceError.writeFailed(reason: error.localizedDescription)
+        }
+    }
+
+    private func writeCalendarsCredentialFile(
+        feeds: [FamilyPortalCalendarCategory: ValidatedCalendarFeedLink],
+        updatedAt: Date
+    ) throws {
+        let directoryURL = savedCalendarsCredentialFileURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            let records = FamilyPortalCalendarCategory.allCases.compactMap { category -> StoredCalendarFeedCredentialRecord? in
+                guard let link = feeds[category] else { return nil }
+                return StoredCalendarFeedCredentialRecord(
+                    categoryRawValue: category.rawValue,
+                    urlString: link.url.absoluteString,
+                    updatedAt: updatedAt
+                )
+            }
+            let payload = StoredCalendarsCredentialFile(feeds: records, updatedAt: updatedAt)
+            let data = try encoder.encode(payload)
+            try data.write(to: savedCalendarsCredentialFileURL, options: [.atomic])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o600)],
+                ofItemAtPath: savedCalendarsCredentialFileURL.path
+            )
+        } catch {
+            SchoolTrackerTelemetry.shared.increment(
+                .calendarSubscriptionUpdateFailure,
+                context: "calendar_credential_io_write_error"
+            )
             throw PersistenceError.writeFailed(reason: error.localizedDescription)
         }
     }
