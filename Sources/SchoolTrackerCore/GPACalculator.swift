@@ -61,21 +61,29 @@ public enum GPACalculator {
     }
 
     /// Computes full GPASummary (unweighted GPA, weighted GPA, credits, Honor Roll) for a list of courses.
+    /// Elementary/middle school courses and non-academic subjects flagged with `countsTowardGPA = false`
+    /// or `countsTowardGraduation = false` are excluded from high school GPA and graduation credits.
     public static func calculateGPA(
         for courses: [ImportedCourse],
         creditPerCourse: Double = defaultSemesterCourseCredit
     ) -> GPASummary {
-        let gradedCourses = courses.filter { $0.numericAverage != nil }
-        guard !gradedCourses.isEmpty else {
-            return GPASummary()
-        }
+        let gpaCourses = courses.filter { $0.numericAverage != nil && $0.countsTowardGPA }
+        let graduationCourses = courses.filter { $0.countsTowardGraduation }
 
         var totalUnweightedPoints: Double = 0.0
         var totalWeightedPoints: Double = 0.0
         var earnedCredits: Double = 0.0
-        let totalAttempted = Double(gradedCourses.count) * creditPerCourse
+        var totalAttempted: Double = 0.0
 
-        for course in gradedCourses {
+        for course in graduationCourses {
+            let credit = course.creditHours ?? creditPerCourse
+            totalAttempted += credit
+            if let score = course.numericAverage, score >= 70.0 {
+                earnedCredits += credit
+            }
+        }
+
+        for course in gpaCourses {
             let score = course.numericAverage ?? 0.0
             let tier = course.effectiveWeightTier
             let unweighted = unweightedPoints(for: score)
@@ -83,17 +91,13 @@ public enum GPACalculator {
 
             totalUnweightedPoints += unweighted
             totalWeightedPoints += weighted
-
-            if score >= 70.0 {
-                earnedCredits += creditPerCourse
-            }
         }
 
-        let count = Double(gradedCourses.count)
-        let unweightedGPA = (totalUnweightedPoints / count * 100.0).rounded() / 100.0
-        let weightedGPA = (totalWeightedPoints / count * 100.0).rounded() / 100.0
+        let count = Double(gpaCourses.count)
+        let unweightedGPA = count > 0 ? ((totalUnweightedPoints / count * 100.0).rounded() / 100.0) : 0.0
+        let weightedGPA = count > 0 ? ((totalWeightedPoints / count * 100.0).rounded() / 100.0) : 0.0
 
-        let honorRoll = evaluateHonorRoll(courses: gradedCourses, weightedGPA: weightedGPA)
+        let honorRoll = evaluateHonorRoll(courses: gpaCourses, weightedGPA: weightedGPA)
 
         return GPASummary(
             unweightedGPA: unweightedGPA,

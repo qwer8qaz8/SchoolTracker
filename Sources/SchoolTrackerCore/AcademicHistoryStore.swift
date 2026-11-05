@@ -169,7 +169,8 @@ public final class AcademicHistoryStore: @unchecked Sendable {
                 let tier = course.effectiveWeightTier
                 let unweighted = course.numericAverage.map { String(format: "%.2f", GPACalculator.unweightedPoints(for: $0)) } ?? ""
                 let weighted = course.numericAverage.map { String(format: "%.2f", GPACalculator.weightedPoints(for: $0, tier: tier)) } ?? ""
-                let credits = (course.numericAverage ?? 0.0) >= 70.0 ? "0.50" : "0.00"
+                let courseCredit = course.creditHours ?? GPACalculator.defaultSemesterCourseCredit
+                let credits = (course.countsTowardGraduation && (course.numericAverage ?? 0.0) >= 70.0) ? String(format: "%.2f", courseCredit) : "0.00"
 
                 let fields = [
                     escapeCSV(snapshot.schoolYear),
@@ -225,7 +226,8 @@ public final class AcademicHistoryStore: @unchecked Sendable {
                 let gradeStr = course.numericAverage.map { String(format: "%.1f%%", $0) } ?? "N/A"
                 let letter = course.letterGrade ?? (course.numericAverage.map { GPACalculator.letterGrade(for: $0) } ?? "-")
                 let tier = course.effectiveWeightTier.rawValue
-                let credits = (course.numericAverage ?? 0.0) >= 70.0 ? "0.50" : "0.00"
+                let courseCredit = course.creditHours ?? GPACalculator.defaultSemesterCourseCredit
+                let credits = (course.countsTowardGraduation && (course.numericAverage ?? 0.0) >= 70.0) ? String(format: "%.2f", courseCredit) : "0.00"
                 let code = course.courseCode ?? "-"
 
                 md += "| \(course.courseName) | \(code) | \(gradeStr) | \(letter) | \(tier) | \(credits) |\n"

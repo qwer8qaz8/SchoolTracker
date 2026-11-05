@@ -117,6 +117,7 @@ public final class SchoolTrackerViewModel: ObservableObject {
     @Published public var draftTranscriptSchoolYear: String = "2026-2027"
     @Published public var draftTranscriptTermName: String = "Semester 1"
     @Published public var draftTranscriptMergeCourses: Bool = true
+    @Published public var draftTranscriptFilterNonHighSchool: Bool = false
 
     // New Task Sheet draft state
     @Published public var draftTaskTitle: String = ""
@@ -294,6 +295,18 @@ public final class SchoolTrackerViewModel: ObservableObject {
     public func setCourseWeightTier(courseID: UUID, tier: CourseWeightTier?) {
         guard let idx = state.courses.firstIndex(where: { $0.id == courseID }) else { return }
         state.courses[idx].weightTier = tier
+        persistCurrentState()
+    }
+
+    public func setCourseCountsTowardGraduation(courseID: UUID, counts: Bool) {
+        guard let idx = state.courses.firstIndex(where: { $0.id == courseID }) else { return }
+        state.courses[idx].countsTowardGraduation = counts
+        persistCurrentState()
+    }
+
+    public func setCourseCountsTowardGPA(courseID: UUID, counts: Bool) {
+        guard let idx = state.courses.firstIndex(where: { $0.id == courseID }) else { return }
+        state.courses[idx].countsTowardGPA = counts
         persistCurrentState()
     }
 

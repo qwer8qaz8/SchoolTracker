@@ -363,14 +363,20 @@ public struct GPADashboardView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
                         }
 
-                        if isAuto {
+                        if !course.countsTowardGraduation || !course.countsTowardGPA {
+                            LiquidGlassBadge("Non-Credit / Excluded", systemImage: "xmark.shield", tint: .orange)
+                        } else if isAuto {
                             LiquidGlassBadge("Auto", systemImage: "sparkles", tint: .teal)
                         } else {
                             LiquidGlassBadge("Custom", tint: .orange)
                         }
                     }
 
-                    if let teacher = course.teacherName {
+                    if let reason = course.exclusionReason {
+                        Text(reason)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    } else if let teacher = course.teacherName {
                         Text(teacher)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -436,24 +442,45 @@ public struct GPADashboardView: View {
 
                 // Calculated GPA Points
                 VStack(alignment: .trailing, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Text("W:")
+                    if course.countsTowardGPA {
+                        HStack(spacing: 4) {
+                            Text("W:")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Text(String(format: "%.2f", weighted))
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(Color.accentColor)
+                            Text("• UW:")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Text(String(format: "%.2f", unweighted))
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    } else {
+                        Text("Excluded from GPA")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.secondary)
-                        Text(String(format: "%.2f", weighted))
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Color.accentColor)
-                        Text("• UW:")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                        Text(String(format: "%.2f", unweighted))
-                            .font(.subheadline.weight(.semibold))
                     }
-                    Text(score >= 70.0 ? "0.50 Credit" : "0.00 Credit")
-                        .font(.caption2)
-                        .foregroundStyle(score >= 70.0 ? Color.green : Color.red)
+
+                    if course.countsTowardGraduation {
+                        Text(score >= 70.0 ? String(format: "%.2f Credit", course.creditHours ?? GPACalculator.defaultSemesterCourseCredit) : "0.00 Credit")
+                            .font(.caption2)
+                            .foregroundStyle(score >= 70.0 ? Color.green : Color.red)
+                    } else {
+                        Text("0.00 Credit (Non-Credit)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .frame(minWidth: 110, alignment: .trailing)
+                .contextMenu {
+                    Button(course.countsTowardGraduation ? "Exclude from Graduation Credits" : "Count Toward Graduation Credits") {
+                        viewModel.setCourseCountsTowardGraduation(courseID: course.id, counts: !course.countsTowardGraduation)
+                    }
+                    Button(course.countsTowardGPA ? "Exclude from GPA Calculation" : "Include in GPA Calculation") {
+                        viewModel.setCourseCountsTowardGPA(courseID: course.id, counts: !course.countsTowardGPA)
+                    }
+                }
             }
         }
     }

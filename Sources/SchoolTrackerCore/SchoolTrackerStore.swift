@@ -402,7 +402,10 @@ public final class SchoolTrackerStore: @unchecked Sendable {
 
         var state = try loadState()
         if mergeIntoCurrentCourses {
-            state.courses = Self.mergeCourses(existing: state.courses, imported: snapshot.courses)
+            let relevantCourses = snapshot.courses.filter { $0.countsTowardGraduation || $0.isRelevantForHighSchool }
+            if !relevantCourses.isEmpty {
+                state.courses = Self.mergeCourses(existing: state.courses, imported: relevantCourses)
+            }
             state.lastSyncedAt = snapshot.syncedAt
         }
         if let idx = state.academicHistory.firstIndex(where: {

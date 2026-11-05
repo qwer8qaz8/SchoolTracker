@@ -26,10 +26,13 @@ public enum TranscriptParseError: Error, Equatable, LocalizedError, Sendable {
 
 public enum LocalTranscriptParser {
     /// Parses transcript or report card text on-device into a TermSnapshot and list of ImportedCourse.
+    /// Elementary/middle school courses (grades 1–8) and non-academic courses (Homeroom, Chapel, etc.)
+    /// are parsed with `countsTowardGraduation = false` and `countsTowardGPA = false`, awarding 0.0 credits.
     public static func parseTranscriptText(
         _ text: String,
         defaultSchoolYear: String = "2026-2027",
-        defaultTerm: String = "Semester 1"
+        defaultTerm: String = "Semester 1",
+        filterElementaryCourses: Bool = false
     ) throws -> (snapshot: TermSnapshot, courses: [ImportedCourse]) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -41,6 +44,13 @@ public enum LocalTranscriptParser {
 
         let rawLines = trimmed.components(separatedBy: .newlines)
         var courses: [ImportedCourse] = []
+        var currentSectionHeader: String? = nil
+
+        // Section header pattern for grades/levels (e.g. "1st Grade - 2015-2016", "Grade 1", "Middle School")
+        let sectionHeaderPattern = try! NSRegularExpression(
+            pattern: #"^\s*(?:=+\s*|--+\s*)?(?:(kindergarten|pre-?k|elementary|middle\s+school|high\s+school)|(?:grade\s*([0-9]{1,2}))|(?:(1st|2nd|3rd|[4-9]th|1[0-2]th)\s+grade))\b"#,
+            options: [.caseInsensitive]
+        )
 
         // Pattern 1: Tabular format: Code (optional) | Name | Grade | Credits (optional) | Tier (optional)
         // e.g. "THEO 11      Christian Doctrine III          94.0   0.50     Regular"
@@ -63,27 +73,46 @@ public enum LocalTranscriptParser {
                   !lineTrimmed.lowercased().hasPrefix("honor roll"),
                   !lineTrimmed.lowercased().hasPrefix("course code"),
                   !lineTrimmed.lowercased().hasPrefix("student:"),
-                  !lineTrimmed.lowercased().hasPrefix("school year:")
+                  !lineTrimmed.lowercased().hasPrefix("school year:"),
+                  !lineTrimmed.lowercased().hasPrefix("attendance:"),
+                  !lineTrimmed.lowercased().hasPrefix("days absent:"),
+                  !lineTrimmed.lowercased().hasPrefix("tardy:")
             else { continue }
 
             let nsLine = line as NSString
             let fullRange = NSRange(location: 0, length: nsLine.length)
 
+            // Check if this line is a section header (e.g. "1st Grade (2015-2016)" or "Grade 9")
+            if sectionHeaderPattern.firstMatch(in: line, options: [], range: fullRange) != nil {
+                currentSectionHeader = lineTrimmed
+            }
+
             if let match = tabularPattern.firstMatch(in: line, options: [], range: fullRange) {
                 let code = match.range(at: 1).location != NSNotFound ? nsLine.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines) : nil
                 let name = nsLine.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
                 let gradeStr = nsLine.substring(with: match.range(at: 3)).replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let creditStr = match.range(at: 4).location != NSNotFound ? nsLine.substring(with: match.range(at: 4)).trimmingCharacters(in: .whitespacesAndNewlines) : nil
                 let tierStr = match.range(at: 5).location != NSNotFound ? nsLine.substring(with: match.range(at: 5)).trimmingCharacters(in: .whitespacesAndNewlines) : nil
 
                 if let grade = Double(gradeStr), grade >= 0.0 && grade <= 150.0 {
+                    let isExcluded = ImportedCourse.isExcludedFromHighSchool(
+                        courseName: name,
+                        courseCode: code,
+                        term: currentSectionHeader ?? termName
+                    )
                     let tier = resolveWeightTier(tierString: tierStr, courseName: name, courseCode: code)
+                    let explicitCredits = creditStr.flatMap(Double.init)
+
                     let course = ImportedCourse(
                         courseName: name,
                         courseCode: code,
                         term: termName,
                         numericAverage: grade,
                         letterGrade: GPACalculator.letterGrade(for: grade),
-                        weightTier: tier
+                        weightTier: tier,
+                        creditHours: isExcluded ? 0.0 : (explicitCredits ?? GPACalculator.defaultSemesterCourseCredit),
+                        countsTowardGraduation: !isExcluded,
+                        countsTowardGPA: !isExcluded
                     )
                     courses.append(course)
                     continue
@@ -94,6 +123,7 @@ public enum LocalTranscriptParser {
                 let code = match.range(at: 1).location != NSNotFound ? nsLine.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines) : nil
                 let name = nsLine.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
                 let gradeStr = nsLine.substring(with: match.range(at: 3)).replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let creditStr = match.range(at: 4).location != NSNotFound ? nsLine.substring(with: match.range(at: 4)).trimmingCharacters(in: .whitespacesAndNewlines) : nil
 
                 guard !name.lowercased().contains("official academic"),
                       !name.lowercased().contains("credits earned"),
@@ -102,18 +132,32 @@ public enum LocalTranscriptParser {
                 else { continue }
 
                 if let grade = Double(gradeStr), grade >= 0.0 && grade <= 150.0 {
+                    let isExcluded = ImportedCourse.isExcludedFromHighSchool(
+                        courseName: name,
+                        courseCode: code,
+                        term: currentSectionHeader ?? termName
+                    )
                     let tier = CourseWeightTier.inferTier(courseName: name, courseCode: code)
+                    let explicitCredits = creditStr.flatMap(Double.init)
+
                     let course = ImportedCourse(
                         courseName: name,
                         courseCode: code,
                         term: termName,
                         numericAverage: grade,
                         letterGrade: GPACalculator.letterGrade(for: grade),
-                        weightTier: tier
+                        weightTier: tier,
+                        creditHours: isExcluded ? 0.0 : (explicitCredits ?? GPACalculator.defaultSemesterCourseCredit),
+                        countsTowardGraduation: !isExcluded,
+                        countsTowardGPA: !isExcluded
                     )
                     courses.append(course)
                 }
             }
+        }
+
+        if filterElementaryCourses {
+            courses = courses.filter { $0.countsTowardGraduation || $0.countsTowardGPA }
         }
 
         guard !courses.isEmpty else {

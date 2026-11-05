@@ -159,6 +159,9 @@ public struct ImportedCourse: Codable, Equatable, Hashable, Identifiable, Sendab
     public var assignments: [ImportedAssignment]
     public var categories: [CategoryBreakdown]
     public var weightTier: CourseWeightTier?
+    public var creditHours: Double?
+    public var countsTowardGraduation: Bool
+    public var countsTowardGPA: Bool
 
     public init(
         id: UUID = UUID(),
@@ -170,7 +173,10 @@ public struct ImportedCourse: Codable, Equatable, Hashable, Identifiable, Sendab
         letterGrade: String? = nil,
         assignments: [ImportedAssignment] = [],
         categories: [CategoryBreakdown] = [],
-        weightTier: CourseWeightTier? = nil
+        weightTier: CourseWeightTier? = nil,
+        creditHours: Double? = nil,
+        countsTowardGraduation: Bool? = nil,
+        countsTowardGPA: Bool? = nil
     ) {
         self.id = id
         self.courseName = courseName
@@ -182,10 +188,141 @@ public struct ImportedCourse: Codable, Equatable, Hashable, Identifiable, Sendab
         self.assignments = assignments
         self.categories = categories
         self.weightTier = weightTier
+        self.creditHours = creditHours
+
+        let isExcluded = Self.isExcludedFromHighSchool(courseName: courseName, courseCode: courseCode, term: term)
+        self.countsTowardGraduation = countsTowardGraduation ?? !isExcluded
+        self.countsTowardGPA = countsTowardGPA ?? !isExcluded
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, courseName, courseCode, teacherName, term, numericAverage, letterGrade, assignments, categories, weightTier
+        case creditHours, countsTowardGraduation, countsTowardGPA
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.courseName = try container.decode(String.self, forKey: .courseName)
+        self.courseCode = try container.decodeIfPresent(String.self, forKey: .courseCode)
+        self.teacherName = try container.decodeIfPresent(String.self, forKey: .teacherName)
+        self.term = try container.decodeIfPresent(String.self, forKey: .term)
+        self.numericAverage = try container.decodeIfPresent(Double.self, forKey: .numericAverage)
+        self.letterGrade = try container.decodeIfPresent(String.self, forKey: .letterGrade)
+        self.assignments = try container.decodeIfPresent([ImportedAssignment].self, forKey: .assignments) ?? []
+        self.categories = try container.decodeIfPresent([CategoryBreakdown].self, forKey: .categories) ?? []
+        self.weightTier = try container.decodeIfPresent(CourseWeightTier.self, forKey: .weightTier)
+        self.creditHours = try container.decodeIfPresent(Double.self, forKey: .creditHours)
+
+        let isExcluded = Self.isExcludedFromHighSchool(courseName: courseName, courseCode: courseCode, term: term)
+        self.countsTowardGraduation = try container.decodeIfPresent(Bool.self, forKey: .countsTowardGraduation) ?? !isExcluded
+        self.countsTowardGPA = try container.decodeIfPresent(Bool.self, forKey: .countsTowardGPA) ?? !isExcluded
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(courseName, forKey: .courseName)
+        try container.encodeIfPresent(courseCode, forKey: .courseCode)
+        try container.encodeIfPresent(teacherName, forKey: .teacherName)
+        try container.encodeIfPresent(term, forKey: .term)
+        try container.encodeIfPresent(numericAverage, forKey: .numericAverage)
+        try container.encodeIfPresent(letterGrade, forKey: .letterGrade)
+        try container.encode(assignments, forKey: .assignments)
+        try container.encode(categories, forKey: .categories)
+        try container.encodeIfPresent(weightTier, forKey: .weightTier)
+        try container.encodeIfPresent(creditHours, forKey: .creditHours)
+        try container.encode(countsTowardGraduation, forKey: .countsTowardGraduation)
+        try container.encode(countsTowardGPA, forKey: .countsTowardGPA)
     }
 
     public var effectiveWeightTier: CourseWeightTier {
         weightTier ?? CourseWeightTier.inferTier(courseName: courseName, courseCode: courseCode)
+    }
+
+    public var isRelevantForHighSchool: Bool {
+        !Self.isExcludedFromHighSchool(courseName: courseName, courseCode: courseCode, term: term)
+    }
+
+    public var exclusionReason: String? {
+        if !countsTowardGraduation && !countsTowardGPA {
+            if Self.isElementaryOrMiddleSchool(name: courseName, code: courseCode, term: term) {
+                return "Elementary / Middle School (Grades 1–8)"
+            }
+            if Self.isNonAcademicOrAdministrative(name: courseName, code: courseCode) {
+                return "Non-Academic / Non-Credit (Advisory, Chapel, etc.)"
+            }
+            return "Excluded from High School Credit & GPA"
+        } else if !countsTowardGraduation {
+            return "Excluded from Graduation Credit"
+        } else if !countsTowardGPA {
+            return "Excluded from GPA"
+        }
+        return nil
+    }
+
+    /// Evaluates if a course is elementary or middle school coursework (Grades 1–8, Kindergarten, etc.).
+    public static func isElementaryOrMiddleSchool(name: String, code: String? = nil, term: String? = nil) -> Bool {
+        let combined = "\(name) \(code ?? "") \(term ?? "")".lowercased()
+
+        // Elementary & Middle School grades (1st through 8th)
+        let gradePattern = #"\b(?:1st|2nd|3rd|[4-8]th|first|second|third|fourth|fifth|sixth|seventh|eighth)\s+grade\b"#
+        if combined.range(of: gradePattern, options: .regularExpression) != nil {
+            return true
+        }
+
+        // "Grade 1" through "Grade 8" or "Gr 1" through "Gr 8" or "Gr. 1" through "Gr. 8"
+        let gradeNumPattern = #"\bgr(?:ade|\.|\s+)\s*[1-8]\b"#
+        if combined.range(of: gradeNumPattern, options: .regularExpression) != nil {
+            return true
+        }
+
+        // Kindergarten / Pre-K / Elementary keywords
+        let earlyEduPattern = #"\b(?:kindergarten|pre-?k|preschool|elementary|primary\s+school)\b"#
+        if combined.range(of: earlyEduPattern, options: .regularExpression) != nil {
+            return true
+        }
+
+        // Middle School keywords
+        let msPattern = #"\b(?:middle\s+school|jr\.?\s*high|junior\s+high)\b"#
+        if combined.range(of: msPattern, options: .regularExpression) != nil {
+            return true
+        }
+
+        // Check course codes specifically
+        if let code = code?.uppercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+            let prefixes = ["MS-", "MS ", "ELEM-", "ELEM ", "KIND-", "KIND ", "GR1-", "GR2-", "GR3-", "GR4-", "GR5-", "GR6-", "GR7-", "GR8-"]
+            for prefix in prefixes where code.hasPrefix(prefix) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /// Evaluates if a course is non-academic or administrative (Homeroom, Advisory, Chapel, Attendance, etc.).
+    public static func isNonAcademicOrAdministrative(name: String, code: String? = nil) -> Bool {
+        let combined = "\(name) \(code ?? "")".lowercased()
+
+        let nonAcademicPattern = #"\b(?:homeroom|advisory|chapel|conduct|citizenship|attendance|study\s+hall|lunch|recess|unassigned|period\s+0|detention|work\s+habits|social\s+(?:growth|development)|character\s+ratings?|aide|office\s+aide|teacher\s+aide)\b"#
+        if combined.range(of: nonAcademicPattern, options: .regularExpression) != nil {
+            return true
+        }
+
+        if let code = code?.uppercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+            let nonCreditPrefixes = ["HR-", "ADV-", "CHP-", "ATT-", "NON-", "ACT-"]
+            for prefix in nonCreditPrefixes where code.hasPrefix(prefix) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /// Evaluates if a course should be excluded from high school credits and GPA calculation.
+    public static func isExcludedFromHighSchool(courseName: String, courseCode: String? = nil, term: String? = nil) -> Bool {
+        isElementaryOrMiddleSchool(name: courseName, code: courseCode, term: term)
+            || isNonAcademicOrAdministrative(name: courseName, code: courseCode)
     }
 
     public var name: String {

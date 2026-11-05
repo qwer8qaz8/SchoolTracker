@@ -168,17 +168,43 @@ public struct TranscriptImportSheet: View {
     // MARK: - Preview View
 
     private func previewView(snapshot: TermSnapshot, courses: [ImportedCourse], rawSnippet: String) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+        let displayCourses = viewModel.draftTranscriptFilterNonHighSchool
+            ? courses.filter { $0.countsTowardGraduation || $0.isRelevantForHighSchool }
+            : courses
+        let previewSummary = GPACalculator.calculateGPA(for: displayCourses)
+        let excludedCount = courses.filter { !$0.countsTowardGraduation && !$0.isRelevantForHighSchool }.count
+
+        return VStack(alignment: .leading, spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Extraction Preview")
                         .font(.headline)
-                    Text("Parsed \(courses.count) course\(courses.count == 1 ? "" : "s") from your document. Review below before saving.")
+                    Text("Parsed \(courses.count) course\(courses.count == 1 ? "" : "s") from your document. Elementary (grades 1–8) and non-academic entries are excluded from graduation credits.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 LiquidGlassBadge("Vision OCR Complete", systemImage: "checkmark.circle.fill", tint: .green)
+            }
+
+            // High school filtering toggle and excluded banner
+            LiquidGlassCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Toggle("Only import relevant High School courses (exclude 1st–8th grade & non-credit)", isOn: $viewModel.draftTranscriptFilterNonHighSchool)
+                            .font(.subheadline.weight(.medium))
+                        Spacer()
+                        if excludedCount > 0 {
+                            LiquidGlassBadge("\(excludedCount) excluded (0.0 credits)", systemImage: "shield.slash.fill", tint: .orange)
+                        }
+                    }
+
+                    if excludedCount > 0 {
+                        Text("Notice: \(excludedCount) course\(excludedCount == 1 ? " was" : "s were") identified as elementary/middle school (grades 1–8) or non-academic and earn 0.0 graduation credits.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             // Editable Term & Year Metadata
@@ -203,7 +229,6 @@ public struct TranscriptImportSheet: View {
             }
 
             // Calculated GPA Preview Card
-            let previewSummary = GPACalculator.calculateGPA(for: courses)
             LiquidGlassCard {
                 HStack(spacing: 24) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -245,14 +270,14 @@ public struct TranscriptImportSheet: View {
 
             // Extracted Courses List
             VStack(alignment: .leading, spacing: 8) {
-                Text("Extracted Courses (\(courses.count))")
+                Text("Extracted Courses (\(displayCourses.count))")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
 
-                ForEach(courses) { course in
+                ForEach(displayCourses) { course in
                     LiquidGlassCard(cornerRadius: 8) {
                         HStack {
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: 4) {
                                 HStack(spacing: 6) {
                                     Text(course.courseName)
                                         .font(.subheadline.weight(.semibold))
@@ -264,25 +289,45 @@ public struct TranscriptImportSheet: View {
                                             .clipShape(RoundedRectangle(cornerRadius: 3))
                                     }
                                 }
-                                LiquidGlassBadge(course.effectiveWeightTier.displayName, tint: .indigo)
+
+                                HStack(spacing: 6) {
+                                    LiquidGlassBadge(course.effectiveWeightTier.displayName, tint: .indigo)
+                                    if !course.countsTowardGraduation || !course.countsTowardGPA {
+                                        LiquidGlassBadge(course.exclusionReason ?? "Excluded (0.0 Cr)", systemImage: "xmark.shield", tint: .orange)
+                                    } else {
+                                        LiquidGlassBadge("HS Credit", systemImage: "checkmark.seal.fill", tint: .green)
+                                    }
+                                }
                             }
 
                             Spacer()
 
-                            if let avg = course.numericAverage {
-                                HStack(spacing: 6) {
-                                    Text(String(format: "%.1f%%", avg))
-                                        .font(.subheadline.weight(.bold))
-                                        .foregroundStyle(SchoolTrackerViewModel.gradeColor(for: avg))
-
-                                    if let letter = course.letterGrade {
-                                        Text(letter)
-                                            .font(.caption.weight(.bold))
-                                            .padding(.horizontal, 4)
-                                            .background(SchoolTrackerViewModel.gradeColor(for: avg).opacity(0.15))
+                            VStack(alignment: .trailing, spacing: 2) {
+                                if let avg = course.numericAverage {
+                                    HStack(spacing: 6) {
+                                        Text(String(format: "%.1f%%", avg))
+                                            .font(.subheadline.weight(.bold))
                                             .foregroundStyle(SchoolTrackerViewModel.gradeColor(for: avg))
-                                            .clipShape(RoundedRectangle(cornerRadius: 3))
+
+                                        if let letter = course.letterGrade {
+                                            Text(letter)
+                                                .font(.caption.weight(.bold))
+                                                .padding(.horizontal, 4)
+                                                .background(SchoolTrackerViewModel.gradeColor(for: avg).opacity(0.15))
+                                                .foregroundStyle(SchoolTrackerViewModel.gradeColor(for: avg))
+                                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                        }
                                     }
+                                }
+
+                                if course.countsTowardGraduation {
+                                    Text(String(format: "+%.2f Credit", course.creditHours ?? GPACalculator.defaultSemesterCourseCredit))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text("0.00 Credit (Excluded)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
                                 }
                             }
                         }

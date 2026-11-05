@@ -732,6 +732,87 @@ final class SchoolTrackerCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.gpaSummary.unweightedGPA, 3.68, accuracy: 0.05)
         XCTAssertEqual(snapshot.gpaSummary.honorRollStatus, .honorRoll)
     }
+
+    func testElementaryAndNonAcademicCoursesExcludedFromHighSchoolCreditsAndGPA() throws {
+        // Test course categorization
+        XCTAssertTrue(ImportedCourse.isElementaryOrMiddleSchool(name: "1st Grade Math"))
+        XCTAssertTrue(ImportedCourse.isElementaryOrMiddleSchool(name: "Grade 1 Reading"))
+        XCTAssertTrue(ImportedCourse.isElementaryOrMiddleSchool(name: "Kindergarten"))
+        XCTAssertTrue(ImportedCourse.isElementaryOrMiddleSchool(name: "Pre-K Motor Skills"))
+        XCTAssertTrue(ImportedCourse.isElementaryOrMiddleSchool(name: "5th Grade Social Studies"))
+        XCTAssertTrue(ImportedCourse.isElementaryOrMiddleSchool(name: "Middle School Band"))
+        XCTAssertFalse(ImportedCourse.isElementaryOrMiddleSchool(name: "Algebra 1"))
+        XCTAssertFalse(ImportedCourse.isElementaryOrMiddleSchool(name: "Spanish 1"))
+        XCTAssertFalse(ImportedCourse.isElementaryOrMiddleSchool(name: "English 9"))
+        XCTAssertFalse(ImportedCourse.isElementaryOrMiddleSchool(name: "Theology 11"))
+
+        XCTAssertTrue(ImportedCourse.isNonAcademicOrAdministrative(name: "Homeroom"))
+        XCTAssertTrue(ImportedCourse.isNonAcademicOrAdministrative(name: "Chapel"))
+        XCTAssertTrue(ImportedCourse.isNonAcademicOrAdministrative(name: "Advisory"))
+        XCTAssertTrue(ImportedCourse.isNonAcademicOrAdministrative(name: "Conduct"))
+        XCTAssertTrue(ImportedCourse.isNonAcademicOrAdministrative(name: "Attendance"))
+        XCTAssertTrue(ImportedCourse.isNonAcademicOrAdministrative(name: "Study Hall"))
+        XCTAssertFalse(ImportedCourse.isNonAcademicOrAdministrative(name: "Biology H"))
+
+        let c1stGrade = ImportedCourse(courseName: "1st Grade Reading", numericAverage: 98.0)
+        XCTAssertFalse(c1stGrade.countsTowardGraduation)
+        XCTAssertFalse(c1stGrade.countsTowardGPA)
+
+        let cHomeroom = ImportedCourse(courseName: "Homeroom", numericAverage: 100.0)
+        XCTAssertFalse(cHomeroom.countsTowardGraduation)
+        XCTAssertFalse(cHomeroom.countsTowardGPA)
+
+        let hsEnglish = ImportedCourse(courseName: "English I H", numericAverage: 94.0, weightTier: .honors)
+        XCTAssertTrue(hsEnglish.countsTowardGraduation)
+        XCTAssertTrue(hsEnglish.countsTowardGPA)
+
+        let hsMath = ImportedCourse(courseName: "Algebra I", numericAverage: 90.0, weightTier: .regular)
+        XCTAssertTrue(hsMath.countsTowardGraduation)
+        XCTAssertTrue(hsMath.countsTowardGPA)
+
+        // GPA calculation must completely exclude 1st grade & homeroom
+        let summary = GPACalculator.calculateGPA(for: [c1stGrade, cHomeroom, hsEnglish, hsMath])
+        // Only hsEnglish (0.50 cr) and hsMath (0.50 cr) should earn credit = 1.0 total
+        XCTAssertEqual(summary.earnedCredits, 1.0, accuracy: 0.01)
+        XCTAssertEqual(summary.totalCreditsAttempted, 1.0, accuracy: 0.01)
+        // GPA is average of hsEnglish (4.3 weighted) and hsMath (3.6 weighted) = (4.3 + 3.6) / 2 = 3.95
+        XCTAssertEqual(summary.weightedGPA, 3.95, accuracy: 0.01)
+        XCTAssertEqual(summary.unweightedGPA, 3.70, accuracy: 0.01)
+    }
+
+    func testLocalTranscriptParserExcludesElementaryCourses() throws {
+        let transcriptText = """
+        Faith Lutheran High School
+        Academic Transcript: 2026-2027
+        Term: Semester 1
+
+        1st Grade - 2015-2016
+        ELEM 101   1st Grade Phonics               98.0   0.50   Regular
+        ELEM 102   1st Grade Math                  95.0   0.50   Regular
+
+        Grade 9 - 2026-2027
+        THEO 11    Christian Doctrine III          94.0   0.50   Regular
+        MATH 184   Calculus I                      95.0   0.50   Dual Credit
+        """
+
+        let (snapshot, courses) = try LocalTranscriptParser.parseTranscriptText(transcriptText)
+        XCTAssertEqual(courses.count, 4)
+
+        let elemPhonics = courses.first(where: { $0.courseName.contains("Phonics") })
+        XCTAssertNotNil(elemPhonics)
+        XCTAssertFalse(elemPhonics!.countsTowardGraduation)
+        XCTAssertFalse(elemPhonics!.countsTowardGPA)
+        XCTAssertEqual(elemPhonics!.creditHours, 0.0)
+
+        let calc = courses.first(where: { $0.courseName == "Calculus I" })
+        XCTAssertNotNil(calc)
+        XCTAssertTrue(calc!.countsTowardGraduation)
+        XCTAssertTrue(calc!.countsTowardGPA)
+
+        // 1st grade courses do NOT count towards graduation credits (only Theo + Calc = 1.0 credit)
+        XCTAssertEqual(snapshot.gpaSummary.earnedCredits, 1.0, accuracy: 0.01)
+        XCTAssertEqual(snapshot.gpaSummary.totalCreditsAttempted, 1.0, accuracy: 0.01)
+    }
 }
 
 #if STANDALONE_TEST_RUNNER && !canImport(XCTest)
@@ -761,7 +842,9 @@ struct StandaloneTestRunner {
             ("testFLHSHandbookGPAScaleAndCourseWeightTiers", suite.testFLHSHandbookGPAScaleAndCourseWeightTiers),
             ("testFLHSHonorRollQualificationsAndDisqualifications", suite.testFLHSHonorRollQualificationsAndDisqualifications),
             ("testAcademicHistoryStoreMultiQuarterPersistenceAndExports", suite.testAcademicHistoryStoreMultiQuarterPersistenceAndExports),
-            ("testLocalTranscriptTextParsingAndTierInference", suite.testLocalTranscriptTextParsingAndTierInference)
+            ("testLocalTranscriptTextParsingAndTierInference", suite.testLocalTranscriptTextParsingAndTierInference),
+            ("testElementaryAndNonAcademicCoursesExcludedFromHighSchoolCreditsAndGPA", suite.testElementaryAndNonAcademicCoursesExcludedFromHighSchoolCreditsAndGPA),
+            ("testLocalTranscriptParserExcludesElementaryCourses", suite.testLocalTranscriptParserExcludesElementaryCourses)
         ]
         let asyncTests: [(String, () async throws -> Void)] = [
             ("testConcurrentLinkValidationAndReportParsing", suite.testConcurrentLinkValidationAndReportParsing),
